@@ -3,10 +3,7 @@
   "context": {
     "account": "639606532074",
     "region": "eu-central-1",
-    "availability_zones": [
-      "eu-central-1b",
-      "eu-central-1c"
-    ],
+    "availability_zones": ["eu-central-1b", "eu-central-1c"],
     "default_model_id": "global.anthropic.claude-sonnet-4-6",
     "subagent_model_id": "",
     "cloudwatch_log_retention_days": 30,
@@ -21,9 +18,11 @@
     "workspace_sync_interval_seconds": 300,
     "router_lambda_timeout_seconds": 600,
     "router_lambda_memory_mb": 2048,
+    "router_lambda_ephemeral_storage_mb": 2048,
     "registration_open": false,
     "cron_lambda_timeout_seconds": 900,
     "cron_lambda_memory_mb": 2048,
+    "cron_lambda_ephemeral_storage_mb": 2048,
     "enable_cloudtrail": false,
     "enable_browser": true,
     "runtime_id": "openclaw_agent-i328btCVMS",
