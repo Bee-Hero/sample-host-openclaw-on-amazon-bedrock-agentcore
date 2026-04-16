@@ -47,7 +47,7 @@ preflight() {
 
   # Python venv
   if [ ! -f "$PROJECT_DIR/.venv/bin/activate" ]; then
-    echo "ERROR: Python venv not found. Run: python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt"
+    echo "ERROR: Python venv not found. Run: uv sync (creates .venv and installs CDK deps from pyproject.toml)"
     errors=$((errors + 1))
   fi
 
@@ -267,7 +267,6 @@ phase2_toolkit() {
     check_arm64_build
     deploy_flags+=("--local-build")
   fi
-  # codebuild mode: no extra flags (default behavior)
 
   "$AGENTCORE_CLI" deploy \
     --agent openclaw_agent \

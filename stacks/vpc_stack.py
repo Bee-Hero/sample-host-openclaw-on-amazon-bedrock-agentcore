@@ -25,7 +25,7 @@ class VpcStack(Stack):
         availability_zones = self.node.try_get_context("availability_zones")
 
         vpc_kwargs = {
-            "ip_addresses": ec2.IpAddresses.cidr("10.0.0.0/16"),
+            "ip_addresses": ec2.IpAddresses.cidr("10.10.0.0/16"),
             "nat_gateways": 1,
             "subnet_configuration": [
                 ec2.SubnetConfiguration(
