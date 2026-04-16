@@ -11,6 +11,7 @@ from aws_cdk import (
     CfnOutput,
     Duration,
     RemovalPolicy,
+    Size,
     Stack,
     aws_apigatewayv2 as apigwv2,
     aws_apigatewayv2_integrations as apigwv2_integrations,
@@ -51,6 +52,9 @@ class RouterStack(Stack):
         log_retention = self.node.try_get_context("cloudwatch_log_retention_days") or 30
         lambda_timeout = int(self.node.try_get_context("router_lambda_timeout_seconds") or "300")
         lambda_memory = int(self.node.try_get_context("router_lambda_memory_mb") or "256")
+        lambda_ephemeral_mb = int(
+            self.node.try_get_context("router_lambda_ephemeral_storage_mb") or "512"
+        )
         registration_open = str(self.node.try_get_context("registration_open") or "false").lower()
 
         # --- DynamoDB Identity Table ---
@@ -94,6 +98,7 @@ class RouterStack(Stack):
             code=_lambda.Code.from_asset("lambda/router"),
             timeout=Duration.seconds(lambda_timeout),
             memory_size=lambda_memory,
+            ephemeral_storage_size=Size.mebibytes(lambda_ephemeral_mb),
             environment={
                 "AGENTCORE_RUNTIME_ARN": runtime_arn,
                 "AGENTCORE_QUALIFIER": runtime_endpoint_id,

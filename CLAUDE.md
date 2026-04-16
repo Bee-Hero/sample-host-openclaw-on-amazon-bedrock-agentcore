@@ -511,9 +511,11 @@ sudo docker push $ACCOUNT.dkr.ecr.$CDK_DEFAULT_REGION.amazonaws.com/bedrock-agen
 | `workspace_sync_interval_seconds` | `300` | .openclaw/ S3 sync interval |
 | `router_lambda_timeout_seconds` | `300` | Router Lambda timeout |
 | `router_lambda_memory_mb` | `256` | Router Lambda memory |
+| `router_lambda_ephemeral_storage_mb` | `512` | Router Lambda `/tmp` (MiB), 512–10240 |
 | `registration_open` | `false` | If true, any user can register. If false, only allowlisted users |
 | `cron_lambda_timeout_seconds` | `600` | Cron executor Lambda timeout (must exceed warmup time) |
 | `cron_lambda_memory_mb` | `256` | Cron executor Lambda memory |
+| `cron_lambda_ephemeral_storage_mb` | `512` | Cron executor `/tmp` (MiB), 512–10240 |
 | `enable_cloudtrail` | `false` | Deploy a dedicated CloudTrail trail (S3 bucket + trail). Off by default — most accounts already have one |
 | `cron_lead_time_minutes` | `5` | Minutes before schedule time to start warmup |
 | `subagent_model_id` | (empty) | Bedrock model for sub-agents. Empty = use `default_model_id` |

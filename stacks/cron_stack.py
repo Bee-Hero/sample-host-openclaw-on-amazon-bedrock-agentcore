@@ -12,6 +12,7 @@ from aws_cdk import (
     CfnOutput,
     Duration,
     RemovalPolicy,
+    Size,
     Stack,
     aws_iam as iam,
     aws_lambda as _lambda,
@@ -48,6 +49,9 @@ class CronStack(Stack):
         log_retention = self.node.try_get_context("cloudwatch_log_retention_days") or 30
         lambda_timeout = int(self.node.try_get_context("cron_lambda_timeout_seconds") or "600")
         lambda_memory = int(self.node.try_get_context("cron_lambda_memory_mb") or "256")
+        lambda_ephemeral_mb = int(
+            self.node.try_get_context("cron_lambda_ephemeral_storage_mb") or "512"
+        )
 
         # --- EventBridge Scheduler Group ---
         self.schedule_group = scheduler.CfnScheduleGroup(
@@ -84,6 +88,7 @@ class CronStack(Stack):
             code=_lambda.Code.from_asset("lambda/cron"),
             timeout=Duration.seconds(lambda_timeout),
             memory_size=lambda_memory,
+            ephemeral_storage_size=Size.mebibytes(lambda_ephemeral_mb),
             environment={
                 "AGENTCORE_RUNTIME_ARN": runtime_arn,
                 "AGENTCORE_QUALIFIER": runtime_endpoint_id,
