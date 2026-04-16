@@ -99,7 +99,8 @@ OpenClaw on AgentCore Runtime — a multi-channel AI messaging bot (Telegram, Sl
 openclaw-on-agentcore/
   app.py                          # CDK app entry point (7 stacks)
   cdk.json                        # Configuration (model, budgets, sessions, cron)
-  requirements.txt                # Python deps (aws-cdk-lib, cdk-nag)
+  pyproject.toml                    # Python deps (uv); aws-cdk-lib, cdk-nag
+  uv.lock                           # Locked versions
   stacks/
     __init__.py                   # Shared helper (RetentionDays converter)
     vpc_stack.py                  # VPC, subnets, NAT, 7 VPC endpoints, flow logs

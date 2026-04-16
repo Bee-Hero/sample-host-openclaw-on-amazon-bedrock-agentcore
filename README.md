@@ -134,11 +134,14 @@ Or edit `cdk.json` directly:
 
 ### 2. Install dependencies
 
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then from the repository root:
+
 ```bash
-python3 -m venv .venv
+uv sync
 source .venv/bin/activate
-pip install -r requirements.txt
 ```
+
+`uv sync` creates `.venv` (if missing) and installs CDK Python dependencies from `pyproject.toml` / `uv.lock`.
 
 ### 3. Bootstrap CDK (first time only)
 
@@ -267,7 +270,8 @@ Send a message to your Telegram bot. The first message triggers a cold start —
 openclaw-on-agentcore/
   app.py                          # CDK app entry point (8 stacks)
   cdk.json                        # Configuration (model, budgets, sessions, cron, guardrails)
-  requirements.txt                # Python deps (aws-cdk-lib, cdk-nag)
+  pyproject.toml                    # Python project metadata + CDK deps (uv)
+  uv.lock                           # Locked dependency versions (uv)
   stacks/
     __init__.py                   # Shared helper (RetentionDays converter)
     vpc_stack.py                  # VPC, subnets, NAT, 7 VPC endpoints, flow logs
