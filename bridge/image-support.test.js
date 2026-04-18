@@ -1,7 +1,7 @@
 /**
  * Tests for image support in the proxy adapter.
  *
- * Tests extractImageReferences, convertMessages with multimodal content,
+ * Tests extractMultimodalReferences, convertMessages with multimodal content,
  * and fetchImageFromS3 key validation.
  */
 
@@ -14,7 +14,7 @@ const assert = require("node:assert/strict");
 // Instead, we'll test the logic directly by reimplementing the pure functions
 // here (they're simple enough to be tested in isolation).
 
-// --- extractImageReferences ---
+// --- extractMultimodalReferences (mirror of agentcore-proxy.js) ---
 
 const ALLOWED_IMAGE_TYPES = new Set([
   "image/jpeg",
@@ -22,41 +22,104 @@ const ALLOWED_IMAGE_TYPES = new Set([
   "image/gif",
   "image/webp",
 ]);
+const ALLOWED_AUDIO_MARKER_TYPES = new Set([
+  "audio/webm",
+  "audio/mpeg",
+  "audio/mp3",
+  "audio/mp4",
+  "audio/wav",
+  "audio/x-wav",
+  "audio/wave",
+  "audio/ogg",
+  "audio/aac",
+  "audio/flac",
+  "audio/x-m4a",
+  "audio/mpga",
+]);
 const IMAGE_MARKER_REGEX = /\n?\n?\[OPENCLAW_IMAGES:(\[.*?\])\]\s*$/;
+const AUDIO_MARKER_REGEX = /\n?\n?\[OPENCLAW_AUDIO:(\[.*?\])\]\s*$/;
+const VALID_BEDROCK_AUDIO_FORMATS = new Set([
+  "mp3",
+  "opus",
+  "wav",
+  "aac",
+  "flac",
+  "mp4",
+  "ogg",
+  "webm",
+  "m4a",
+  "mpeg",
+  "mpga",
+  "pcm",
+  "mkv",
+  "mka",
+  "x-aac",
+]);
 
-function extractImageReferences(text) {
-  if (typeof text !== "string") return { cleanText: text, images: [] };
-
-  const match = text.match(IMAGE_MARKER_REGEX);
-  if (!match) return { cleanText: text, images: [] };
-
-  const cleanText = text.slice(0, match.index).trimEnd();
+function extractMultimodalReferences(text) {
+  if (typeof text !== "string") return { cleanText: text, images: [], audio: [] };
+  let work = text;
+  const audio = [];
+  const audioMatch = work.match(AUDIO_MARKER_REGEX);
+  if (audioMatch) {
+    try {
+      const parsed = JSON.parse(audioMatch[1]);
+      if (Array.isArray(parsed)) {
+        for (const a of parsed) {
+          if (
+            a.s3Key &&
+            typeof a.s3Key === "string" &&
+            a.s3Key.includes("/aud_") &&
+            a.format &&
+            VALID_BEDROCK_AUDIO_FORMATS.has(a.format) &&
+            a.contentType &&
+            ALLOWED_AUDIO_MARKER_TYPES.has(a.contentType)
+          ) {
+            audio.push({
+              s3Key: a.s3Key,
+              contentType: a.contentType,
+              format: a.format,
+            });
+          }
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+    work = work.slice(0, audioMatch.index).trimEnd();
+  }
+  const imageMatch = work.match(IMAGE_MARKER_REGEX);
+  if (!imageMatch) {
+    return { cleanText: work, images: [], audio };
+  }
+  const cleanText = work.slice(0, imageMatch.index).trimEnd();
   try {
-    const images = JSON.parse(match[1]);
-    if (!Array.isArray(images)) return { cleanText, images: [] };
+    const images = JSON.parse(imageMatch[1]);
+    if (!Array.isArray(images)) return { cleanText, images: [], audio };
     const validImages = images.filter(
       (img) =>
         img.s3Key &&
         img.contentType &&
         ALLOWED_IMAGE_TYPES.has(img.contentType),
     );
-    return { cleanText, images: validImages };
+    return { cleanText, images: validImages, audio };
   } catch {
-    return { cleanText, images: [] };
+    return { cleanText, images: [], audio };
   }
 }
 
-describe("extractImageReferences", () => {
+describe("extractMultimodalReferences", () => {
   it("returns original text when no marker present", () => {
-    const result = extractImageReferences("Hello, how are you?");
+    const result = extractMultimodalReferences("Hello, how are you?");
     assert.equal(result.cleanText, "Hello, how are you?");
     assert.equal(result.images.length, 0);
+    assert.equal(result.audio.length, 0);
   });
 
   it("extracts single image reference", () => {
     const text =
       'What is this?\n\n[OPENCLAW_IMAGES:[{"s3Key":"ns/_uploads/img_123.jpeg","contentType":"image/jpeg"}]]';
-    const result = extractImageReferences(text);
+    const result = extractMultimodalReferences(text);
     assert.equal(result.cleanText, "What is this?");
     assert.equal(result.images.length, 1);
     assert.equal(result.images[0].s3Key, "ns/_uploads/img_123.jpeg");
@@ -66,14 +129,14 @@ describe("extractImageReferences", () => {
   it("handles empty text with image only", () => {
     const text =
       '\n\n[OPENCLAW_IMAGES:[{"s3Key":"ns/_uploads/img.png","contentType":"image/png"}]]';
-    const result = extractImageReferences(text);
+    const result = extractMultimodalReferences(text);
     assert.equal(result.cleanText, "");
     assert.equal(result.images.length, 1);
   });
 
   it("handles invalid JSON gracefully", () => {
     const text = "Hello\n\n[OPENCLAW_IMAGES:[not valid json]]";
-    const result = extractImageReferences(text);
+    const result = extractMultimodalReferences(text);
     assert.equal(result.cleanText, "Hello");
     assert.equal(result.images.length, 0);
   });
@@ -81,13 +144,13 @@ describe("extractImageReferences", () => {
   it("rejects disallowed content types", () => {
     const text =
       'Check this\n\n[OPENCLAW_IMAGES:[{"s3Key":"ns/_uploads/file.pdf","contentType":"application/pdf"}]]';
-    const result = extractImageReferences(text);
+    const result = extractMultimodalReferences(text);
     assert.equal(result.cleanText, "Check this");
     assert.equal(result.images.length, 0);
   });
 
   it("handles non-string input", () => {
-    const result = extractImageReferences(42);
+    const result = extractMultimodalReferences(42);
     assert.equal(result.cleanText, 42);
     assert.equal(result.images.length, 0);
   });
@@ -95,7 +158,7 @@ describe("extractImageReferences", () => {
   it("handles trailing whitespace after marker", () => {
     const text =
       'Look\n\n[OPENCLAW_IMAGES:[{"s3Key":"ns/_uploads/img.jpeg","contentType":"image/jpeg"}]]  \n';
-    const result = extractImageReferences(text);
+    const result = extractMultimodalReferences(text);
     assert.equal(result.cleanText, "Look");
     assert.equal(result.images.length, 1);
   });
@@ -103,9 +166,26 @@ describe("extractImageReferences", () => {
   it("filters out entries missing s3Key", () => {
     const text =
       'Hi\n\n[OPENCLAW_IMAGES:[{"contentType":"image/jpeg"},{"s3Key":"ns/_uploads/img.jpeg","contentType":"image/jpeg"}]]';
-    const result = extractImageReferences(text);
+    const result = extractMultimodalReferences(text);
     assert.equal(result.images.length, 1);
     assert.equal(result.images[0].s3Key, "ns/_uploads/img.jpeg");
+  });
+
+  it("extracts audio marker after image marker", () => {
+    const text =
+      'Hi\n\n[OPENCLAW_IMAGES:[{"s3Key":"ns/_uploads/img.jpeg","contentType":"image/jpeg"}]]\n\n[OPENCLAW_AUDIO:[{"s3Key":"ns/_uploads/aud_1.webm","contentType":"audio/webm","format":"webm"}]]';
+    const result = extractMultimodalReferences(text);
+    assert.equal(result.cleanText, "Hi");
+    assert.equal(result.images.length, 1);
+    assert.equal(result.audio.length, 1);
+    assert.equal(result.audio[0].format, "webm");
+  });
+
+  it("rejects audio without aud_ in key", () => {
+    const text =
+      '[OPENCLAW_AUDIO:[{"s3Key":"ns/_uploads/img_1.jpeg","contentType":"audio/webm","format":"webm"}]]';
+    const result = extractMultimodalReferences(text);
+    assert.equal(result.audio.length, 0);
   });
 });
 
@@ -126,6 +206,8 @@ function convertMessages(messages) {
             bedrockContent.push({ text: part.text });
           } else if (part.type === "image_bedrock" && part.image) {
             bedrockContent.push({ image: part.image });
+          } else if (part.type === "audio_bedrock" && part.audio) {
+            bedrockContent.push({ audio: part.audio });
           }
         }
         if (bedrockContent.length > 0) {
@@ -236,6 +318,28 @@ describe("convertMessages with multimodal content", () => {
     const { bedrockMessages } = convertMessages(messages);
     assert.equal(bedrockMessages[0].content.length, 1);
     assert.equal(bedrockMessages[0].content[0].text, "Hello");
+  });
+
+  it("converts audio_bedrock parts", () => {
+    const messages = [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Transcribe this" },
+          {
+            type: "audio_bedrock",
+            audio: {
+              format: "webm",
+              source: { bytes: Buffer.from("fake-audio") },
+            },
+          },
+        ],
+      },
+    ];
+    const { bedrockMessages } = convertMessages(messages);
+    assert.equal(bedrockMessages[0].content.length, 2);
+    assert.ok(bedrockMessages[0].content[1].audio);
+    assert.equal(bedrockMessages[0].content[1].audio.format, "webm");
   });
 });
 

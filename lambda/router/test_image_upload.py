@@ -78,6 +78,29 @@ class TestUploadImageToS3(unittest.TestCase):
         self.assertIsNone(result)
 
 
+class TestUploadAudioToS3(unittest.TestCase):
+    """Tests for _upload_audio_to_s3."""
+
+    def setUp(self):
+        self.original_bucket = index.USER_FILES_BUCKET
+        index.USER_FILES_BUCKET = "test-bucket"
+
+    def tearDown(self):
+        index.USER_FILES_BUCKET = self.original_bucket
+
+    @patch.object(index, "s3_client")
+    def test_valid_webm_upload(self, mock_s3):
+        result = index._upload_audio_to_s3(b"\x1a\x45\xdf\xa3" + b"\x00" * 100, "slack_U1", "audio/webm")
+        self.assertIsNotNone(result)
+        self.assertTrue(result.startswith("slack_U1/_uploads/aud_"))
+        self.assertTrue(result.endswith(".webm"))
+        mock_s3.put_object.assert_called_once()
+
+    def test_invalid_audio_type(self):
+        result = index._upload_audio_to_s3(b"data", "ns", "video/mp4")
+        self.assertIsNone(result)
+
+
 class TestDownloadTelegramImage(unittest.TestCase):
     """Tests for _download_telegram_image."""
 
@@ -213,7 +236,10 @@ class TestBuildStructuredMessage(unittest.TestCase):
 
     def test_with_text_and_image(self):
         """Builds message with both text and image reference."""
-        result = index._build_structured_message("What's this?", "ns/_uploads/img.jpeg", "image/jpeg")
+        result = index._build_structured_message(
+            "What's this?",
+            image_items=[{"s3Key": "ns/_uploads/img.jpeg", "contentType": "image/jpeg"}],
+        )
         self.assertEqual(result["text"], "What's this?")
         self.assertEqual(len(result["images"]), 1)
         self.assertEqual(result["images"][0]["s3Key"], "ns/_uploads/img.jpeg")
@@ -221,9 +247,28 @@ class TestBuildStructuredMessage(unittest.TestCase):
 
     def test_without_text(self):
         """Builds message with empty text when caption is missing."""
-        result = index._build_structured_message("", "ns/_uploads/img.png", "image/png")
+        result = index._build_structured_message(
+            "",
+            image_items=[{"s3Key": "ns/_uploads/img.png", "contentType": "image/png"}],
+        )
         self.assertEqual(result["text"], "")
         self.assertEqual(len(result["images"]), 1)
+
+    def test_audio_items(self):
+        result = index._build_structured_message(
+            "Voice note",
+            audio_items=[
+                {
+                    "s3Key": "ns/_uploads/aud_1.webm",
+                    "contentType": "audio/webm",
+                    "format": "webm",
+                },
+            ],
+        )
+        self.assertEqual(result["text"], "Voice note")
+        self.assertNotIn("images", result)
+        self.assertEqual(len(result["audio"]), 1)
+        self.assertEqual(result["audio"][0]["format"], "webm")
 
 
 class TestHandleTelegramWithImages(unittest.TestCase):
