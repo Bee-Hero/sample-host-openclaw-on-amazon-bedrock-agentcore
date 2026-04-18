@@ -502,7 +502,7 @@ Users can send photos alongside text messages. The system supports JPEG, PNG, GI
 
 **Slack**: The bot requires the `files:read` OAuth scope to download file attachments. Without it, images are silently ignored and only text is processed.
 
-**Slack voice messages**: Slack `files` entries with supported audio MIME types (for example `audio/webm`, `audio/mpeg`, `audio/mp4`, `audio/ogg`, up to **10 MB**) are downloaded with the same private URL flow, stored under `{namespace}/_uploads/aud_{timestamp}_{hex}.{ext}`, and passed through to Bedrock as audio content so the model can hear the recording. `files:read` is required.
+**Slack voice messages**: Slack `files` entries with supported audio MIME types (for example `audio/webm`, `audio/mpeg`, `audio/mp4`, `audio/ogg`, up to **10 MB**) are downloaded with the same private URL flow, stored under `{namespace}/_uploads/aud_{timestamp}_{hex}.{ext}`, and passed through to Bedrock as audio content so the model can hear the recording. `files:read` is required. Your Bedrock **model must support Converse audio input** (see [model cards](https://docs.aws.amazon.com/bedrock/latest/userguide/model-cards.html)); if Bedrock rejects the request, the warm-up shim surfaces the error text from the proxy so you can read the exact `ValidationException` (often format or capability related) in chat or in container logs.
 
 ### Cross-Channel Account Linking
 

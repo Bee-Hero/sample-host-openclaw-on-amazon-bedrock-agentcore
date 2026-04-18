@@ -1351,7 +1351,16 @@ function callProxy(messages) {
         res.on("data", (chunk) => (body += chunk));
         res.on("end", () => {
           try {
-            const parsed = JSON.parse(body);
+            const parsed = JSON.parse(body || "{}");
+            if (res.statusCode < 200 || res.statusCode >= 300) {
+              const msg =
+                parsed?.error?.message ||
+                parsed?.message ||
+                (body && body.slice(0, 500)) ||
+                `HTTP ${res.statusCode}`;
+              reject(new Error(msg));
+              return;
+            }
             resolve(parsed);
           } catch (e) {
             reject(new Error(`Proxy response parse error: ${e.message}`));
@@ -1406,6 +1415,9 @@ async function chat(userMessage, userId, deadlineMs = 0) {
     if (!choice) {
       const errDetail = response.error?.message || JSON.stringify(response).slice(0, 300);
       console.error(`[shim] No choices in proxy response: ${errDetail}`);
+      if (response.error?.message) {
+        return "The model request failed: " + response.error.message;
+      }
       return `I received an unexpected response. Please try again.`;
     }
 

@@ -1152,6 +1152,15 @@ function convertMessages(messages) {
   return { bedrockMessages, systemText };
 }
 
+function bedrockMessagesContainAudio(bedrockMessages) {
+  return bedrockMessages.some(
+    (m) =>
+      m.role === "user" &&
+      Array.isArray(m.content) &&
+      m.content.some((c) => c && c.audio),
+  );
+}
+
 /**
  * Determine if the incoming request is from a subagent.
  * Returns true when the requested model name matches the distinct subagent model name.
@@ -1193,6 +1202,13 @@ async function invokeBedrock(messages, systemTextOverride, toolConfig, requested
   });
   const { bedrockMessages, systemText } = convertMessages(messages);
   const finalSystemText = systemTextOverride || systemText;
+  let effectiveToolConfig = toolConfig;
+  if (bedrockMessagesContainAudio(bedrockMessages) && toolConfig) {
+    console.log(
+      "[proxy] Omitting toolConfig for Converse request that includes audio",
+    );
+    effectiveToolConfig = undefined;
+  }
 
   const params = {
     modelId,
@@ -1201,7 +1217,7 @@ async function invokeBedrock(messages, systemTextOverride, toolConfig, requested
     inferenceConfig: { maxTokens: 16384, temperature: 0.7 },
     ...(guardrailConfig && { guardrailConfig }),
   };
-  if (toolConfig) params.toolConfig = toolConfig;
+  if (effectiveToolConfig) params.toolConfig = effectiveToolConfig;
 
   let lastError;
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
@@ -1292,6 +1308,13 @@ async function invokeBedrockStreaming(
   });
   const { bedrockMessages, systemText } = convertMessages(messages);
   const finalSystemText = systemTextOverride || systemText;
+  let effectiveToolConfig = toolConfig;
+  if (bedrockMessagesContainAudio(bedrockMessages) && toolConfig) {
+    console.log(
+      "[proxy] Omitting toolConfig for ConverseStream request that includes audio",
+    );
+    effectiveToolConfig = undefined;
+  }
 
   const params = {
     modelId,
@@ -1300,7 +1323,7 @@ async function invokeBedrockStreaming(
     inferenceConfig: { maxTokens: 16384, temperature: 0.7 },
     ...(guardrailConfig && { guardrailConfig }),
   };
-  if (toolConfig) params.toolConfig = toolConfig;
+  if (effectiveToolConfig) params.toolConfig = effectiveToolConfig;
 
   const chatId = `chatcmpl-${Date.now()}`;
   const created = Math.floor(Date.now() / 1000);
@@ -1670,7 +1693,9 @@ const server = http.createServer(async (req, res) => {
                   type: "audio_bedrock",
                   audio: {
                     format: fetched.format,
-                    source: { bytes: fetched.bytes },
+                    source: {
+                      bytes: new Uint8Array(fetched.bytes),
+                    },
                   },
                 });
               } else {
@@ -1678,6 +1703,21 @@ const server = http.createServer(async (req, res) => {
                   `[proxy] Skipping unfetchable audio: ${aud.s3Key}`,
                 );
               }
+            }
+            const hasAudioPart = contentParts.some(
+              (p) => p.type === "audio_bedrock",
+            );
+            const hasUserText = contentParts.some(
+              (p) =>
+                p.type === "text" &&
+                typeof p.text === "string" &&
+                p.text.trim().length > 0,
+            );
+            if (hasAudioPart && !hasUserText) {
+              contentParts.unshift({
+                type: "text",
+                text: "(Slack voice message — respond using the attached audio.)",
+              });
             }
             if (contentParts.length > 0) {
               processedMessages = [
