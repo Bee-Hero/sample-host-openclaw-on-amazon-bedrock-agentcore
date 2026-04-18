@@ -297,6 +297,72 @@ class AgentCoreStack(Stack):
         # S3 per-user file storage permissions
         self.user_files_bucket.grant_read_write(self.execution_role)
 
+        self.execution_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "transcribe:StartTranscriptionJob",
+                    "transcribe:GetTranscriptionJob",
+                    "transcribe:DeleteTranscriptionJob",
+                ],
+                resources=["*"],
+            )
+        )
+
+        self.execution_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["polly:SynthesizeSpeech"],
+                resources=["*"],
+            )
+        )
+
+        self.user_files_bucket.add_to_resource_policy(
+            iam.PolicyStatement(
+                sid="OpenClawTranscribeReadMedia",
+                principals=[iam.ServicePrincipal("transcribe.amazonaws.com")],
+                actions=["s3:GetObject"],
+                resources=[self.user_files_bucket.arn_for_objects("*")],
+                conditions={
+                    "StringEquals": {"aws:SourceAccount": account},
+                    "ArnLike": {
+                        "aws:SourceArn": f"arn:aws:transcribe:{region}:{account}:transcription-job/*",
+                    },
+                },
+            )
+        )
+        self.user_files_bucket.add_to_resource_policy(
+            iam.PolicyStatement(
+                sid="OpenClawTranscribeWriteOutput",
+                principals=[iam.ServicePrincipal("transcribe.amazonaws.com")],
+                actions=["s3:PutObject"],
+                resources=[
+                    self.user_files_bucket.arn_for_objects("_transcribe_output/*"),
+                ],
+                conditions={
+                    "StringEquals": {"aws:SourceAccount": account},
+                    "ArnLike": {
+                        "aws:SourceArn": f"arn:aws:transcribe:{region}:{account}:transcription-job/*",
+                    },
+                },
+            )
+        )
+
+        user_files_cmk.add_to_resource_policy(
+            iam.PolicyStatement(
+                sid="OpenClawTranscribeKms",
+                principals=[iam.ServicePrincipal("transcribe.amazonaws.com")],
+                actions=[
+                    "kms:Decrypt",
+                    "kms:GenerateDataKey",
+                    "kms:CreateGrant",
+                    "kms:DescribeKey",
+                ],
+                resources=["*"],
+                conditions={
+                    "StringEquals": {"aws:SourceAccount": account},
+                },
+            )
+        )
+
         # --- Runtime info (from Starter Toolkit, read via context) ------------
         # Runtime/Endpoint/ECR managed by Starter Toolkit (`agentcore deploy`),
         # not CDK. These are populated by the deploy script after `agentcore deploy`

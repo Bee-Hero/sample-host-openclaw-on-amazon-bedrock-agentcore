@@ -98,6 +98,8 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+const { transcribeS3Audio } = require("./transcribe-s3");
+
 /**
  * Extract session metadata from request headers and body.
  * Returns { sessionId, actorId, channel }.
@@ -418,8 +420,6 @@ const CONTENT_TYPE_TO_BEDROCK_FORMAT = {
 const IMAGE_MARKER_REGEX = /\n?\n?\[OPENCLAW_IMAGES:(\[.*?\])\]\s*$/;
 const AUDIO_MARKER_REGEX = /\n?\n?\[OPENCLAW_AUDIO:(\[.*?\])\]\s*$/;
 const MAX_IMAGE_BYTES = 3_750_000;
-const MAX_AUDIO_BYTES = 10_485_760;
-
 const VALID_BEDROCK_AUDIO_FORMATS = new Set([
   "mp3",
   "opus",
@@ -555,58 +555,6 @@ async function fetchImageFromS3(s3Key, expectedNamespace) {
   } catch (err) {
     console.error(
       `[proxy] Failed to fetch image from S3: ${s3Key} — ${err.message}`,
-    );
-    return null;
-  }
-}
-
-async function fetchAudioFromS3(s3Key, expectedNamespace, format) {
-  if (s3Key.includes("..")) {
-    console.warn(`[proxy] Rejected S3 audio key with path traversal: ${s3Key}`);
-    return null;
-  }
-  const expectedPrefix = expectedNamespace + "/_uploads/";
-  if (!s3Key.startsWith(expectedPrefix) || !s3Key.includes("/aud_")) {
-    console.warn(
-      `[proxy] Rejected S3 audio key outside user uploads: ${s3Key}`,
-    );
-    return null;
-  }
-  if (!format || !VALID_BEDROCK_AUDIO_FORMATS.has(format)) {
-    console.warn(`[proxy] Rejected invalid Bedrock audio format: ${format}`);
-    return null;
-  }
-  const bucket = process.env.S3_USER_FILES_BUCKET;
-  if (!bucket) {
-    console.warn(
-      "[proxy] S3_USER_FILES_BUCKET not configured — cannot fetch audio",
-    );
-    return null;
-  }
-  try {
-    const { GetObjectCommand } = require("@aws-sdk/client-s3");
-    const s3 = getS3Client();
-    const resp = await s3.send(
-      new GetObjectCommand({ Bucket: bucket, Key: s3Key }),
-    );
-    const chunks = [];
-    for await (const chunk of resp.Body) {
-      chunks.push(chunk);
-    }
-    const bytes = Buffer.concat(chunks);
-    if (bytes.length > MAX_AUDIO_BYTES) {
-      console.warn(
-        `[proxy] S3 audio too large: ${bytes.length} bytes (key=${s3Key})`,
-      );
-      return null;
-    }
-    console.log(
-      `[proxy] Fetched audio from S3: ${s3Key} (${bytes.length} bytes, format=${format})`,
-    );
-    return { bytes, format };
-  } catch (err) {
-    console.error(
-      `[proxy] Failed to fetch audio from S3: ${s3Key} — ${err.message}`,
     );
     return null;
   }
@@ -1640,8 +1588,36 @@ const server = http.createServer(async (req, res) => {
               `[proxy] Found ${images.length} image(s), ${audio.length} audio in last user message`,
             );
             const contentParts = [];
-            if (cleanText) {
-              contentParts.push({ type: "text", text: cleanText });
+            let combinedUserText = cleanText || "";
+            if (audio.length > 0) {
+              const lines = [];
+              for (const aud of audio) {
+                try {
+                  const t = await transcribeS3Audio({
+                    s3Key: aud.s3Key,
+                    mediaFormat: aud.format,
+                    namespace,
+                  });
+                  if (t) lines.push(t);
+                } catch (err) {
+                  console.warn(
+                    `[proxy] Transcribe failed for ${aud.s3Key}: ${err.message}`,
+                  );
+                }
+              }
+              if (lines.length > 0) {
+                const block = lines.join("\n");
+                combinedUserText = combinedUserText
+                  ? `(Voice transcription)\n${block}\n\n${combinedUserText}`
+                  : `(Voice transcription)\n${block}`;
+              } else {
+                combinedUserText = combinedUserText
+                  ? `(Voice transcription unavailable.)\n\n${combinedUserText}`
+                  : "(Voice transcription unavailable.)";
+              }
+            }
+            if (combinedUserText) {
+              contentParts.push({ type: "text", text: combinedUserText });
             }
             for (const img of images) {
               const fetched = await fetchImageFromS3(img.s3Key, namespace);
@@ -1656,26 +1632,6 @@ const server = http.createServer(async (req, res) => {
               } else {
                 console.warn(
                   `[proxy] Skipping unfetchable image: ${img.s3Key}`,
-                );
-              }
-            }
-            for (const aud of audio) {
-              const fetched = await fetchAudioFromS3(
-                aud.s3Key,
-                namespace,
-                aud.format,
-              );
-              if (fetched) {
-                contentParts.push({
-                  type: "audio_bedrock",
-                  audio: {
-                    format: fetched.format,
-                    source: { bytes: fetched.bytes },
-                  },
-                });
-              } else {
-                console.warn(
-                  `[proxy] Skipping unfetchable audio: ${aud.s3Key}`,
                 );
               }
             }

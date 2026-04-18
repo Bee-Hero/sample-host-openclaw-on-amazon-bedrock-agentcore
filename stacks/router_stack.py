@@ -234,6 +234,13 @@ class RouterStack(Stack):
             )
         )
 
+        self.router_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["s3:GetObject"],
+                resources=[f"{user_files_bucket_arn}/*"],
+            )
+        )
+
         # KMS GenerateDataKey for S3 bucket encryption (bucket uses KMS CMK)
         self.router_fn.add_to_role_policy(
             iam.PolicyStatement(
@@ -273,12 +280,14 @@ class RouterStack(Stack):
                     "Secrets Manager scoped to openclaw/* prefix. DynamoDB "
                     "grant_read_write_data adds index wildcards and KMS wildcards "
                     "for CMK-encrypted table. S3 PutObject scoped to */_uploads/* "
-                    "prefix for image uploads.",
+                    "for uploads; S3 GetObject on user-files bucket for screenshot "
+                    "and voice-reply delivery (keys validated in Lambda to user namespace).",
                     applies_to=[
                         f"Resource::{runtime_arn}/*",
                         f"Resource::arn:aws:secretsmanager:{region}:{account}:secret:openclaw/*",
                         f"Resource::{self.identity_table.table_arn}/index/*",
                         "Resource::<UserFilesBucketCFDFD8C0.Arn>/*/_uploads/*",
+                        "Resource::<UserFilesBucketCFDFD8C0.Arn>/*",
                         "Action::kms:GenerateDataKey*",
                         "Action::kms:ReEncrypt*",
                     ],

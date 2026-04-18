@@ -47,6 +47,8 @@ RUN cd /app && npm init -y > /dev/null 2>&1 && \
                 @aws-sdk/client-scheduler \
                 @aws-sdk/client-dynamodb \
                 @aws-sdk/client-sts \
+                @aws-sdk/client-transcribe \
+                @aws-sdk/client-polly \
                 @aws-sdk/lib-dynamodb \
                 playwright-core \
                 @aws-sdk/s3-request-presigner \
@@ -64,6 +66,8 @@ RUN mkdir -p /app/.compile-cache && \
       require('@aws-sdk/client-scheduler'); \
       require('@aws-sdk/client-dynamodb'); \
       require('@aws-sdk/client-sts'); \
+      require('@aws-sdk/client-transcribe'); \
+      require('@aws-sdk/client-polly'); \
       require('@aws-sdk/lib-dynamodb'); \
       require('ws'); \
       console.log('[build] V8 compile cache pre-warmed'); \
@@ -114,6 +118,11 @@ COPY lightweight-agent.js /app/lightweight-agent.js
 COPY workspace-sync.js /app/workspace-sync.js
 COPY cloudwatch-logger.js /app/cloudwatch-logger.js
 COPY scoped-credentials.js /app/scoped-credentials.js
+COPY transcribe-s3.js /app/transcribe-s3.js
+COPY polly-tts.js /app/polly-tts.js
+COPY response-markers.js /app/response-markers.js
+COPY telegram-multipart.js /app/telegram-multipart.js
+COPY telegram-media-from-s3.js /app/telegram-media-from-s3.js
 COPY force-ipv4.js /app/force-ipv4.js
 
 # Copy custom per-user file storage skill
@@ -136,6 +145,12 @@ RUN chmod +x /skills/api-keys/*.js
 # Copy AgentCore browser skill (headless Chromium browsing)
 COPY skills/agentcore-browser /skills/agentcore-browser
 RUN chmod +x /skills/agentcore-browser/*.js
+
+COPY skills/transcribe-audio /skills/transcribe-audio
+RUN chmod +x /skills/transcribe-audio/*.js
+
+COPY skills/text-to-speech /skills/text-to-speech
+RUN chmod +x /skills/text-to-speech/*.js
 
 # Copy project instructions (CLAUDE.md) so the agent knows about its skills
 COPY CLAUDE.md /app/CLAUDE.md

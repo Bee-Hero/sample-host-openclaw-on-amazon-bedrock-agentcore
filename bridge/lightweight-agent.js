@@ -15,6 +15,8 @@ const path = require("path");
 const http = require("http");
 const https = require("https");
 const { execFile, spawn } = require("child_process");
+const { transcribeS3Audio } = require("./transcribe-s3");
+const { synthesizeSpeechToS3 } = require("./polly-tts");
 
 const PROXY_PORT = 18790;
 const PROXY_URL = `http://127.0.0.1:${PROXY_PORT}/v1/chat/completions`;
@@ -422,6 +424,47 @@ const TOOLS = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "transcribe_voice_file",
+      description:
+        "Transcribe an audio file in the user's S3 uploads (Amazon Transcribe). " +
+        "The s3_key must be under this user's namespace and include /_uploads/aud_ (voice upload prefix). " +
+        "Use when the user asks to turn a specific stored audio clip into text.",
+      parameters: {
+        type: "object",
+        properties: {
+          s3_key: {
+            type: "string",
+            description:
+              "Full S3 object key, e.g. telegram_12345/_uploads/aud_1700000000_a1b2c3d4.webm",
+          },
+        },
+        required: ["s3_key"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "synthesize_speech",
+      description:
+        "Convert text to spoken audio (Amazon Polly neural MP3), upload to the user's S3 namespace, " +
+        "and return a [VOICE_REPLY:key] marker for chat delivery. Use when the user asks for a voice or audio reply. " +
+        "Text is limited to about 3000 characters per call; shorten if needed.",
+      parameters: {
+        type: "object",
+        properties: {
+          text: {
+            type: "string",
+            description: "Plain text to speak",
+          },
+        },
+        required: ["text"],
+      },
+    },
+  },
 ];
 
 /**
@@ -465,6 +508,8 @@ const SCRIPT_MAP = {
   migrate_api_key: null, // In-process tool — move keys between backends
   web_fetch: null, // In-process tool — no child process script
   web_search: null, // In-process tool — no child process script
+  transcribe_voice_file: null,
+  synthesize_speech: null,
 };
 
 // --- SSRF prevention: block private/reserved IPs ---
@@ -1223,6 +1268,39 @@ async function executeRetrieveApiKey(args, namespace) {
 /**
  * Migrate an API key between storage backends.
  */
+async function executeSynthesizeSpeech(args, userId) {
+  const { text } = args;
+  if (!text || typeof text !== "string") {
+    return "Error: text is required.";
+  }
+  const namespace = userId.replace(/:/g, "_");
+  try {
+    const key = await synthesizeSpeechToS3({ text, namespace });
+    return `[VOICE_REPLY:${key}]`;
+  } catch (e) {
+    return `Error: ${e.message}`;
+  }
+}
+
+async function executeTranscribeVoice(args, userId) {
+  const { s3_key } = args;
+  if (!s3_key || typeof s3_key !== "string") {
+    return "Error: s3_key is required.";
+  }
+  const namespace = userId.replace(/:/g, "_");
+  const ext = (s3_key.split(".").pop() || "mp3").toLowerCase();
+  try {
+    const text = await transcribeS3Audio({
+      s3Key: s3_key,
+      mediaFormat: ext,
+      namespace,
+    });
+    return text || "(empty transcript)";
+  } catch (e) {
+    return `Error: ${e.message}`;
+  }
+}
+
 async function executeMigrateApiKey(args, namespace) {
   const { key_name, direction } = args;
   if (!key_name || !VALID_KEY_NAME.test(key_name)) {
@@ -1287,6 +1365,12 @@ function executeTool(toolName, args, userId) {
   }
   if (toolName === "web_search") {
     return executeWebSearch(args.query);
+  }
+  if (toolName === "transcribe_voice_file") {
+    return executeTranscribeVoice(args, userId);
+  }
+  if (toolName === "synthesize_speech") {
+    return executeSynthesizeSpeech(args, userId);
   }
 
   // write_user_file uses spawn+stdin for content delivery

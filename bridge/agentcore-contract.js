@@ -517,6 +517,18 @@ function writeOpenClawConfig() {
         "",
         "Use these for real-time information, news, research, and reading web pages.",
         "",
+        "## Voice and audio",
+        "",
+        "Inbound voice messages from Slack are transcribed with Amazon Transcribe before the model sees them; you receive the text as `(Voice transcription)` at the start of the user message.",
+        "To transcribe other audio already stored under the user's `/_uploads/aud_*` keys, use the **transcribe-audio** skill:",
+        "`node /skills/transcribe-audio/transcribe.js <user_id> <s3_key>` (same `<user_id>` namespace format as s3-user-files).",
+        "",
+        "## Spoken replies (text-to-speech)",
+        "",
+        "When the user asks you to reply in voice or audio, synthesize speech with Amazon Polly using the **text-to-speech** skill, then include the marker in your reply so the channel can send the clip:",
+        "`node /skills/text-to-speech/synthesize.js <user_id> '{\"text\":\"...\"}'`",
+        "The script prints a line containing `[VOICE_REPLY:namespace/_voice_out/tts_....mp3]` — paste that marker in your message (you may add a short text caption before or after). Maximum length is about 3000 characters per synthesis; shorten or summarize if needed.",
+        "",
         "## Scheduling & Cron Jobs",
         "",
         "You have the **eventbridge-cron** skill for scheduling tasks. When users ask to set up reminders,",
@@ -943,6 +955,7 @@ async function init(userId, actorId, channel) {
       COGNITO_CLIENT_ID: process.env.COGNITO_CLIENT_ID || "",
       COGNITO_PASSWORD_SECRET: COGNITO_PASSWORD_SECRET || "",
       S3_USER_FILES_BUCKET: process.env.S3_USER_FILES_BUCKET || "",
+      CMK_ARN: process.env.CMK_ARN || "",
       SUBAGENT_MODEL_NAME: SUBAGENT_MODEL_NAME,
       SUBAGENT_BEDROCK_MODEL_ID: process.env.SUBAGENT_BEDROCK_MODEL_ID || "",
       USER_ID: actorId,
@@ -1235,9 +1248,9 @@ function telegramApiCall(method, body) {
  * then sends ONE clean final message when done. No intermediate edits.
  *
  * onDelta(text): starts a typing indicator loop (sendChatAction every 5s).
- * finalize(text): stops the typing loop and sends a single sendMessage.
+ * finalize(text): stops the typing loop and sends text plus any S3-backed media markers.
  */
-function createTelegramStreamer(chatId) {
+function createTelegramStreamer(chatId, namespace) {
   let typingInterval = null;
   let typingStarted = false;
 
@@ -1276,15 +1289,18 @@ function createTelegramStreamer(chatId) {
     stopTypingLoop();
     if (!text) return { messageId: null };
     try {
-      const resp = await telegramApiCall("sendMessage", {
-        chat_id: chatId,
+      const { deliverTelegramMediaFromResponse } = require("./telegram-media-from-s3");
+      const r = await deliverTelegramMediaFromResponse(
+        TELEGRAM_BOT_TOKEN,
+        chatId,
+        namespace,
         text,
-      });
-      const messageId = resp.ok ? resp.result?.message_id : null;
-      if (messageId) {
-        console.log(`[telegram-stream] Final message sent: msg_id=${messageId}`);
+      );
+      if (r.errors.length) {
+        console.warn(`[telegram-stream] Media delivery notes: ${r.errors.join("; ")}`);
       }
-      return { messageId };
+      console.log(`[telegram-stream] Final delivery parts sent: ${r.sent}`);
+      return { messageId: r.sent > 0 };
     } catch (err) {
       console.warn(`[telegram-stream] Final send error: ${err.message}`);
       return { messageId: null };
@@ -1853,7 +1869,8 @@ const server = http.createServer(async (req, res) => {
             // actorId is "telegram:123456789" — extract numeric chat ID
             const chatId = actorId.split(":")[1];
             if (chatId) {
-              telegramStreamer = createTelegramStreamer(chatId);
+              const ns = actorId.replace(/:/g, "_");
+              telegramStreamer = createTelegramStreamer(chatId, ns);
               console.log(
                 `[contract] Telegram streaming enabled for chat_id=${chatId}`,
               );

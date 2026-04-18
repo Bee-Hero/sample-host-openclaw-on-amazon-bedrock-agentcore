@@ -221,6 +221,37 @@ describe("buildSessionPolicy", () => {
     assert.equal(dynamoStmt.Condition, undefined, "DynamoDB should have no Condition block");
   });
 
+  it("includes polly in wildcard service statement", () => {
+    const policy = buildSessionPolicy({
+      bucket: "b",
+      namespace: "telegram_1",
+      cmkArn: "arn:aws:kms:us-west-2:1:key/x",
+    });
+    const parsed = JSON.parse(policy);
+    const svc = parsed.Statement.find(
+      (s) =>
+        Array.isArray(s.Action) && s.Action.includes("polly:SynthesizeSpeech"),
+    );
+    assert.ok(svc, "polly action should be present");
+  });
+
+  it("includes transcribe job actions in wildcard service statement", () => {
+    const policy = buildSessionPolicy({
+      bucket: "b",
+      namespace: "telegram_1",
+      cmkArn: "arn:aws:kms:us-west-2:1:key/x",
+    });
+    const parsed = JSON.parse(policy);
+    const svc = parsed.Statement.find(
+      (s) =>
+        Array.isArray(s.Action) &&
+        s.Action.includes("transcribe:StartTranscriptionJob"),
+    );
+    assert.ok(svc, "transcribe actions should be present");
+    assert.ok(svc.Action.includes("transcribe:GetTranscriptionJob"));
+    assert.ok(svc.Action.includes("transcribe:DeleteTranscriptionJob"));
+  });
+
   it("includes scheduler:* in statement 1 with Resource *", () => {
     const policy = buildSessionPolicy({
       bucket: "my-bucket",

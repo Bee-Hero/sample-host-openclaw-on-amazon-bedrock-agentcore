@@ -35,9 +35,11 @@ describe("TOOLS", () => {
     "migrate_api_key",
     "web_fetch",
     "web_search",
+    "transcribe_voice_file",
+    "synthesize_speech",
   ];
 
-  it("contains all 17 expected tools", () => {
+  it("contains all 19 expected tools", () => {
     const names = TOOLS.map((t) => t.function.name);
     assert.deepStrictEqual(names, EXPECTED_TOOLS);
   });
@@ -142,6 +144,8 @@ describe("SCRIPT_MAP", () => {
     assert.equal(SCRIPT_MAP.migrate_api_key, null);
     assert.equal(SCRIPT_MAP.web_fetch, null);
     assert.equal(SCRIPT_MAP.web_search, null);
+    assert.equal(SCRIPT_MAP.transcribe_voice_file, null);
+    assert.equal(SCRIPT_MAP.synthesize_speech, null);
   });
 });
 

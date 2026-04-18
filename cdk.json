@@ -3,7 +3,10 @@
   "context": {
     "account": "639606532074",
     "region": "eu-central-1",
-    "availability_zones": ["eu-central-1b", "eu-central-1c"],
+    "availability_zones": [
+      "eu-central-1b",
+      "eu-central-1c"
+    ],
     "default_model_id": "global.anthropic.claude-sonnet-4-6",
     "subagent_model_id": "",
     "cloudwatch_log_retention_days": 30,
