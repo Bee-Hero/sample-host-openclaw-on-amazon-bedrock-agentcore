@@ -147,6 +147,35 @@ class TestSlackEventTypeFiltering(unittest.TestCase):
         result = index.handle_slack(json.dumps(event))
         self.assertEqual(result["statusCode"], 200)
 
+    @patch.object(index, "_get_slack_tokens", return_value=(SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET))
+    @patch.object(index, "resolve_user", return_value=("user_abc123", False))
+    @patch.object(index, "get_or_create_session", return_value="ses_test")
+    @patch.object(index, "_download_slack_audio", return_value=(b"webm-bytes", "audio/webm", "voice.webm"))
+    @patch.object(index, "_upload_audio_to_s3", return_value="slack_U123/_uploads/aud_test.webm")
+    @patch.object(index, "invoke_agent_runtime", return_value={"response": "Heard you"})
+    @patch.object(index, "send_slack_message")
+    def test_slack_voice_audio_only(
+        self, mock_send, mock_invoke, mock_upload, mock_download, mock_session, mock_resolve, mock_tokens,
+    ):
+        event = _make_slack_message_event(
+            text="",
+            files=[{
+                "mimetype": "audio/webm",
+                "size": 800,
+                "url_private_download": "https://files.slack.com/voice.webm",
+            }],
+        )
+        result = index.handle_slack(json.dumps(event))
+        self.assertEqual(result["statusCode"], 200)
+        mock_download.assert_called_once()
+        mock_upload.assert_called_once()
+        msg = mock_invoke.call_args[0][4]
+        self.assertIsInstance(msg, dict)
+        self.assertEqual(msg["text"], "")
+        self.assertIn("audio", msg)
+        self.assertEqual(msg["audio"][0]["format"], "webm")
+        self.assertEqual(msg["audio"][0]["s3Key"], "slack_U123/_uploads/aud_test.webm")
+
 
 class TestSlackMentionStripping(unittest.TestCase):
     """Tests for bot mention stripping in Slack messages."""

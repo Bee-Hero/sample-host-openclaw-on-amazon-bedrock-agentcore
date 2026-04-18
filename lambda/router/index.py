@@ -612,7 +612,7 @@ def redeem_bind_code(code, channel, channel_user_id, display_name=""):
 def invoke_agent_runtime(session_id, user_id, actor_id, channel, message):
     """Invoke the AgentCore Runtime with a per-user session.
 
-    Message can be a plain string or a structured dict with text + images.
+    Message can be a plain string or a structured dict with text, optional images, optional audio.
     """
     payload = json.dumps({
         "action": "chat",
@@ -1216,13 +1216,88 @@ def _get_webhook_secret():
 # ---------------------------------------------------------------------------
 
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
-MAX_IMAGE_BYTES = 3_750_000  # 3.75 MB — Bedrock Converse limit
+ALLOWED_AUDIO_TYPES = {
+    "audio/webm",
+    "audio/mpeg",
+    "audio/mp3",
+    "audio/mp4",
+    "audio/wav",
+    "audio/x-wav",
+    "audio/wave",
+    "audio/ogg",
+    "audio/aac",
+    "audio/flac",
+    "audio/x-m4a",
+    "audio/mpga",
+}
+MAX_IMAGE_BYTES = 3_750_000
+MAX_AUDIO_BYTES = 10_485_760
 CONTENT_TYPE_TO_EXT = {
     "image/jpeg": "jpeg",
     "image/png": "png",
     "image/gif": "gif",
     "image/webp": "webp",
 }
+AUDIO_CONTENT_TYPE_TO_EXT = {
+    "audio/webm": "webm",
+    "audio/mpeg": "mp3",
+    "audio/mp3": "mp3",
+    "audio/mp4": "mp4",
+    "audio/wav": "wav",
+    "audio/x-wav": "wav",
+    "audio/wave": "wav",
+    "audio/ogg": "ogg",
+    "audio/aac": "aac",
+    "audio/flac": "flac",
+    "audio/x-m4a": "m4a",
+    "audio/mpga": "mpga",
+}
+AUDIO_CONTENT_TYPE_TO_FORMAT = {
+    "audio/webm": "webm",
+    "audio/mpeg": "mp3",
+    "audio/mp3": "mp3",
+    "audio/mp4": "mp4",
+    "audio/wav": "wav",
+    "audio/x-wav": "wav",
+    "audio/wave": "wav",
+    "audio/ogg": "ogg",
+    "audio/aac": "aac",
+    "audio/flac": "flac",
+    "audio/x-m4a": "m4a",
+    "audio/mpga": "mpga",
+}
+
+
+def _upload_audio_to_s3(audio_bytes, namespace, content_type):
+    if not USER_FILES_BUCKET:
+        logger.warning("USER_FILES_BUCKET not configured — cannot upload audio")
+        return None
+    if content_type not in ALLOWED_AUDIO_TYPES:
+        logger.warning("Rejected audio with unsupported content type: %s", content_type)
+        return None
+    if len(audio_bytes) > MAX_AUDIO_BYTES:
+        logger.warning(
+            "Rejected audio: %d bytes exceeds limit of %d",
+            len(audio_bytes),
+            MAX_AUDIO_BYTES,
+        )
+        return None
+    ext = AUDIO_CONTENT_TYPE_TO_EXT.get(content_type, "bin")
+    timestamp = int(time.time())
+    hex_suffix = uuid.uuid4().hex[:8]
+    s3_key = f"{namespace}/_uploads/aud_{timestamp}_{hex_suffix}.{ext}"
+    try:
+        s3_client.put_object(
+            Bucket=USER_FILES_BUCKET,
+            Key=s3_key,
+            Body=audio_bytes,
+            ContentType=content_type,
+        )
+        logger.info("Uploaded audio to s3://%s/%s (%d bytes)", USER_FILES_BUCKET, s3_key, len(audio_bytes))
+        return s3_key
+    except Exception as e:
+        logger.error("S3 audio upload failed: %s", e)
+        return None
 
 
 def _upload_image_to_s3(image_bytes, namespace, content_type):
@@ -1314,45 +1389,47 @@ def _download_telegram_image(message, token):
         return None, None, None
 
 
-def _download_slack_file(file_info, bot_token):
-    """Download an image file from Slack.
-
-    Returns (bytes, content_type, filename) or (None, None, None).
-    """
+def _download_slack_file_bytes(file_info, bot_token, allowed_mimetypes, max_bytes):
     mimetype = file_info.get("mimetype", "")
-    if mimetype not in ALLOWED_IMAGE_TYPES:
+    if mimetype not in allowed_mimetypes:
         return None, None, None
-
     file_size = file_info.get("size", 0)
-    if file_size > MAX_IMAGE_BYTES:
+    if file_size > max_bytes:
         logger.warning("Slack file too large: %d bytes", file_size)
         return None, None, None
-
     download_url = file_info.get("url_private_download") or file_info.get("url_private")
     if not download_url:
         logger.warning("Slack file has no download URL")
         return None, None, None
-
     try:
         req = urllib_request.Request(
             download_url,
             headers={"Authorization": f"Bearer {bot_token}"},
         )
-        resp = urllib_request.urlopen(req, timeout=15)
-        image_bytes = resp.read()
-        filename = file_info.get("name", "image")
-        return image_bytes, mimetype, filename
+        resp = urllib_request.urlopen(req, timeout=60)
+        data = resp.read()
+        filename = file_info.get("name", "file")
+        return data, mimetype, filename
     except Exception as e:
         logger.error("Slack file download failed: %s", e)
         return None, None, None
 
 
-def _build_structured_message(text, s3_key, content_type):
-    """Build a structured message dict with text and image reference."""
-    return {
-        "text": text or "",
-        "images": [{"s3Key": s3_key, "contentType": content_type}],
-    }
+def _download_slack_file(file_info, bot_token):
+    return _download_slack_file_bytes(file_info, bot_token, ALLOWED_IMAGE_TYPES, MAX_IMAGE_BYTES)
+
+
+def _download_slack_audio(file_info, bot_token):
+    return _download_slack_file_bytes(file_info, bot_token, ALLOWED_AUDIO_TYPES, MAX_AUDIO_BYTES)
+
+
+def _build_structured_message(text, *, image_items=None, audio_items=None):
+    msg = {"text": text or ""}
+    if image_items:
+        msg["images"] = image_items
+    if audio_items:
+        msg["audio"] = audio_items
+    return msg
 
 
 # ---------------------------------------------------------------------------
@@ -1451,7 +1528,10 @@ def handle_telegram(body):
         if image_bytes:
             s3_key = _upload_image_to_s3(image_bytes, namespace, content_type)
             if s3_key:
-                agent_message = _build_structured_message(text, s3_key, content_type)
+                agent_message = _build_structured_message(
+                    text,
+                    image_items=[{"s3Key": s3_key, "contentType": content_type}],
+                )
             else:
                 send_telegram_message(chat_id, "Sorry, I couldn't process that image. Please try again.", token)
                 return
@@ -1538,9 +1618,14 @@ def handle_slack(body, headers=None):
         f for f in (event.get("files") or [])
         if f.get("mimetype", "") in ALLOWED_IMAGE_TYPES
     ]
+    audio_files = [
+        f for f in (event.get("files") or [])
+        if f.get("mimetype", "") in ALLOWED_AUDIO_TYPES
+    ]
     has_image = bool(image_files)
+    has_audio = bool(audio_files)
 
-    if not slack_user_id or not channel_id or (not text and not has_image):
+    if not slack_user_id or not channel_id or (not text and not has_image and not has_audio):
         return {"statusCode": 200, "body": "ok"}
 
     if len(slack_user_id) > 128:
@@ -1589,30 +1674,55 @@ def handle_slack(body, headers=None):
         )
         return {"statusCode": 200, "body": "ok"}
 
-    # Build message payload (structured if image, plain string if text-only)
     agent_message = text
+    namespace = actor_id.replace(":", "_")
+    image_items = []
+    audio_items = []
     if has_image:
-        namespace = actor_id.replace(":", "_")
-        # Use first image file
         file_info = image_files[0]
         image_bytes, content_type, _ = _download_slack_file(file_info, bot_token)
         if image_bytes:
             s3_key = _upload_image_to_s3(image_bytes, namespace, content_type)
             if s3_key:
-                agent_message = _build_structured_message(text, s3_key, content_type)
+                image_items.append({"s3Key": s3_key, "contentType": content_type})
             else:
                 send_slack_message(channel_id, "Sorry, I couldn't process that image. Please try again.", bot_token)
                 return {"statusCode": 200, "body": "ok"}
         else:
             send_slack_message(channel_id, "Sorry, I couldn't download that image. Please try again.", bot_token)
             return {"statusCode": 200, "body": "ok"}
+    if has_audio:
+        file_info = audio_files[0]
+        audio_bytes, content_type, _ = _download_slack_audio(file_info, bot_token)
+        if audio_bytes:
+            br_fmt = AUDIO_CONTENT_TYPE_TO_FORMAT.get(content_type)
+            if not br_fmt:
+                send_slack_message(channel_id, "Sorry, that audio format is not supported.", bot_token)
+                return {"statusCode": 200, "body": "ok"}
+            s3_key = _upload_audio_to_s3(audio_bytes, namespace, content_type)
+            if s3_key:
+                audio_items.append(
+                    {"s3Key": s3_key, "contentType": content_type, "format": br_fmt},
+                )
+            else:
+                send_slack_message(channel_id, "Sorry, I couldn't process that audio. Please try again.", bot_token)
+                return {"statusCode": 200, "body": "ok"}
+        else:
+            send_slack_message(channel_id, "Sorry, I couldn't download that audio. Please try again.", bot_token)
+            return {"statusCode": 200, "body": "ok"}
+    if image_items or audio_items:
+        agent_message = _build_structured_message(
+            text,
+            image_items=image_items or None,
+            audio_items=audio_items or None,
+        )
 
     # Get or create session
     session_id = get_or_create_session(resolved_user_id)
 
     logger.info(
-        "Slack: user=%s actor=%s session=%s msg_len=%d has_image=%s",
-        resolved_user_id, actor_id, session_id, len(text), has_image,
+        "Slack: user=%s actor=%s session=%s msg_len=%d has_image=%s has_audio=%s",
+        resolved_user_id, actor_id, session_id, len(text), has_image, has_audio,
     )
 
     # Invoke AgentCore with progress notification for long requests
@@ -1753,7 +1863,10 @@ def handle_feishu(body, headers=None):
         if image_bytes:
             s3_key = _upload_image_to_s3(image_bytes, namespace, content_type)
             if s3_key:
-                agent_message = _build_structured_message(text or "What is this image?", s3_key, content_type)
+                agent_message = _build_structured_message(
+                    text or "What is this image?",
+                    image_items=[{"s3Key": s3_key, "contentType": content_type}],
+                )
             else:
                 send_feishu_message(chat_id, "Sorry, I couldn't process that image. Please try again.")
                 return {"statusCode": 200, "body": "ok"}

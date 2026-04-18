@@ -395,6 +395,20 @@ const ALLOWED_IMAGE_TYPES = new Set([
   "image/gif",
   "image/webp",
 ]);
+const ALLOWED_AUDIO_MARKER_TYPES = new Set([
+  "audio/webm",
+  "audio/mpeg",
+  "audio/mp3",
+  "audio/mp4",
+  "audio/wav",
+  "audio/x-wav",
+  "audio/wave",
+  "audio/ogg",
+  "audio/aac",
+  "audio/flac",
+  "audio/x-m4a",
+  "audio/mpga",
+]);
 const CONTENT_TYPE_TO_BEDROCK_FORMAT = {
   "image/jpeg": "jpeg",
   "image/png": "png",
@@ -402,32 +416,77 @@ const CONTENT_TYPE_TO_BEDROCK_FORMAT = {
   "image/webp": "webp",
 };
 const IMAGE_MARKER_REGEX = /\n?\n?\[OPENCLAW_IMAGES:(\[.*?\])\]\s*$/;
-const MAX_IMAGE_BYTES = 3_750_000; // 3.75 MB — Bedrock limit
+const AUDIO_MARKER_REGEX = /\n?\n?\[OPENCLAW_AUDIO:(\[.*?\])\]\s*$/;
+const MAX_IMAGE_BYTES = 3_750_000;
+const MAX_AUDIO_BYTES = 10_485_760;
 
-/**
- * Extract image references from text that contains the [OPENCLAW_IMAGES:...] marker.
- * Returns { cleanText, images } where images is an array of { s3Key, contentType }.
- */
-function extractImageReferences(text) {
-  if (typeof text !== "string") return { cleanText: text, images: [] };
+const VALID_BEDROCK_AUDIO_FORMATS = new Set([
+  "mp3",
+  "opus",
+  "wav",
+  "aac",
+  "flac",
+  "mp4",
+  "ogg",
+  "mkv",
+  "mka",
+  "x-aac",
+  "m4a",
+  "mpeg",
+  "mpga",
+  "pcm",
+  "webm",
+]);
 
-  const match = text.match(IMAGE_MARKER_REGEX);
-  if (!match) return { cleanText: text, images: [] };
-
-  const cleanText = text.slice(0, match.index).trimEnd();
+function extractMultimodalReferences(text) {
+  if (typeof text !== "string") return { cleanText: text, images: [], audio: [] };
+  let work = text;
+  const audio = [];
+  const audioMatch = work.match(AUDIO_MARKER_REGEX);
+  if (audioMatch) {
+    try {
+      const parsed = JSON.parse(audioMatch[1]);
+      if (Array.isArray(parsed)) {
+        for (const a of parsed) {
+          if (
+            a.s3Key &&
+            typeof a.s3Key === "string" &&
+            a.s3Key.includes("/aud_") &&
+            a.format &&
+            VALID_BEDROCK_AUDIO_FORMATS.has(a.format) &&
+            a.contentType &&
+            ALLOWED_AUDIO_MARKER_TYPES.has(a.contentType)
+          ) {
+            audio.push({
+              s3Key: a.s3Key,
+              contentType: a.contentType,
+              format: a.format,
+            });
+          }
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+    work = work.slice(0, audioMatch.index).trimEnd();
+  }
+  const imageMatch = work.match(IMAGE_MARKER_REGEX);
+  if (!imageMatch) {
+    return { cleanText: work, images: [], audio };
+  }
+  const cleanText = work.slice(0, imageMatch.index).trimEnd();
   try {
-    const images = JSON.parse(match[1]);
-    if (!Array.isArray(images)) return { cleanText, images: [] };
-    // Validate each image entry
+    const images = JSON.parse(imageMatch[1]);
+    if (!Array.isArray(images)) return { cleanText, images: [], audio };
     const validImages = images.filter(
       (img) =>
         img.s3Key &&
         img.contentType &&
         ALLOWED_IMAGE_TYPES.has(img.contentType),
     );
-    return { cleanText, images: validImages };
+    return { cleanText, images: validImages, audio };
   } catch {
-    return { cleanText, images: [] };
+    return { cleanText, images: [], audio };
   }
 }
 
@@ -496,6 +555,58 @@ async function fetchImageFromS3(s3Key, expectedNamespace) {
   } catch (err) {
     console.error(
       `[proxy] Failed to fetch image from S3: ${s3Key} — ${err.message}`,
+    );
+    return null;
+  }
+}
+
+async function fetchAudioFromS3(s3Key, expectedNamespace, format) {
+  if (s3Key.includes("..")) {
+    console.warn(`[proxy] Rejected S3 audio key with path traversal: ${s3Key}`);
+    return null;
+  }
+  const expectedPrefix = expectedNamespace + "/_uploads/";
+  if (!s3Key.startsWith(expectedPrefix) || !s3Key.includes("/aud_")) {
+    console.warn(
+      `[proxy] Rejected S3 audio key outside user uploads: ${s3Key}`,
+    );
+    return null;
+  }
+  if (!format || !VALID_BEDROCK_AUDIO_FORMATS.has(format)) {
+    console.warn(`[proxy] Rejected invalid Bedrock audio format: ${format}`);
+    return null;
+  }
+  const bucket = process.env.S3_USER_FILES_BUCKET;
+  if (!bucket) {
+    console.warn(
+      "[proxy] S3_USER_FILES_BUCKET not configured — cannot fetch audio",
+    );
+    return null;
+  }
+  try {
+    const { GetObjectCommand } = require("@aws-sdk/client-s3");
+    const s3 = getS3Client();
+    const resp = await s3.send(
+      new GetObjectCommand({ Bucket: bucket, Key: s3Key }),
+    );
+    const chunks = [];
+    for await (const chunk of resp.Body) {
+      chunks.push(chunk);
+    }
+    const bytes = Buffer.concat(chunks);
+    if (bytes.length > MAX_AUDIO_BYTES) {
+      console.warn(
+        `[proxy] S3 audio too large: ${bytes.length} bytes (key=${s3Key})`,
+      );
+      return null;
+    }
+    console.log(
+      `[proxy] Fetched audio from S3: ${s3Key} (${bytes.length} bytes, format=${format})`,
+    );
+    return { bytes, format };
+  } catch (err) {
+    console.error(
+      `[proxy] Failed to fetch audio from S3: ${s3Key} — ${err.message}`,
     );
     return null;
   }
@@ -942,6 +1053,8 @@ function convertMessages(messages) {
             bedrockContent.push({ text: part.text });
           } else if (part.type === "image_bedrock" && part.image) {
             bedrockContent.push({ image: part.image });
+          } else if (part.type === "audio_bedrock" && part.audio) {
+            bedrockContent.push({ audio: part.audio });
           }
         }
         if (bedrockContent.length > 0) {
@@ -1520,10 +1633,11 @@ const server = http.createServer(async (req, res) => {
                     .map((p) => p.text)
                     .join("")
                 : "";
-          const { cleanText, images } = extractImageReferences(textContent);
-          if (images.length > 0) {
+          const { cleanText, images, audio } =
+            extractMultimodalReferences(textContent);
+          if (images.length > 0 || audio.length > 0) {
             console.log(
-              `[proxy] Found ${images.length} image reference(s) in last user message`,
+              `[proxy] Found ${images.length} image(s), ${audio.length} audio in last user message`,
             );
             const contentParts = [];
             if (cleanText) {
@@ -1545,9 +1659,27 @@ const server = http.createServer(async (req, res) => {
                 );
               }
             }
-            // Fall back to original message if all images failed and no text
+            for (const aud of audio) {
+              const fetched = await fetchAudioFromS3(
+                aud.s3Key,
+                namespace,
+                aud.format,
+              );
+              if (fetched) {
+                contentParts.push({
+                  type: "audio_bedrock",
+                  audio: {
+                    format: fetched.format,
+                    source: { bytes: fetched.bytes },
+                  },
+                });
+              } else {
+                console.warn(
+                  `[proxy] Skipping unfetchable audio: ${aud.s3Key}`,
+                );
+              }
+            }
             if (contentParts.length > 0) {
-              // Build new messages array (immutable — don't mutate original)
               processedMessages = [
                 ...messages.slice(0, lastUserIdx),
                 { ...lastUser, content: contentParts },
@@ -1555,7 +1687,7 @@ const server = http.createServer(async (req, res) => {
               ];
             } else {
               console.warn(
-                "[proxy] All images failed to fetch and no text — using original message",
+                "[proxy] All media failed to fetch and no text — using original message",
               );
             }
           }

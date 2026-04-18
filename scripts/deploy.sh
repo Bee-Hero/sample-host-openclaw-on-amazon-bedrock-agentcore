@@ -271,7 +271,7 @@ phase2_toolkit() {
   "$AGENTCORE_CLI" deploy \
     --agent openclaw_agent \
     --auto-update-on-conflict \
-    "${deploy_flags[@]}" \
+    "${deploy_flags[@]+"${deploy_flags[@]}"}" \
     --env "AWS_REGION=$REGION" \
     --env "BEDROCK_MODEL_ID=$DEFAULT_MODEL_ID" \
     --env "GATEWAY_TOKEN_SECRET_ID=$GATEWAY_TOKEN_SECRET_ID" \

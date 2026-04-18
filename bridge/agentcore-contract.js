@@ -1576,17 +1576,18 @@ async function bridgeMessage(message, timeoutMs = 620000, onDelta) {
  * Handles structured messages with images and plain text.
  */
 function buildBridgeText(message) {
-  if (
-    typeof message === "object" &&
-    message !== null &&
-    Array.isArray(message.images)
-  ) {
-    return (
-      (message.text || "") +
-      "\n\n[OPENCLAW_IMAGES:" +
-      JSON.stringify(message.images) +
-      "]"
-    );
+  if (typeof message === "object" && message !== null) {
+    const parts = [];
+    if (message.text) parts.push(message.text);
+    if (Array.isArray(message.images) && message.images.length > 0) {
+      parts.push("[OPENCLAW_IMAGES:" + JSON.stringify(message.images) + "]");
+    }
+    if (Array.isArray(message.audio) && message.audio.length > 0) {
+      parts.push("[OPENCLAW_AUDIO:" + JSON.stringify(message.audio) + "]");
+    }
+    if (parts.length > 0) {
+      return parts.join("\n\n");
+    }
   }
   if (typeof message === "string") {
     return message;

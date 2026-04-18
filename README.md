@@ -502,6 +502,8 @@ Users can send photos alongside text messages. The system supports JPEG, PNG, GI
 
 **Slack**: The bot requires the `files:read` OAuth scope to download file attachments. Without it, images are silently ignored and only text is processed.
 
+**Slack voice messages**: Slack `files` entries with supported audio MIME types (for example `audio/webm`, `audio/mpeg`, `audio/mp4`, `audio/ogg`, up to **10 MB**) are downloaded with the same private URL flow, stored under `{namespace}/_uploads/aud_{timestamp}_{hex}.{ext}`, and passed through to Bedrock as audio content so the model can hear the recording. `files:read` is required.
+
 ### Cross-Channel Account Linking
 
 By default, each channel creates a separate user identity. If you use both Telegram and Slack, you'll have two separate sessions with separate conversation histories. To unify them into a single identity and shared session:

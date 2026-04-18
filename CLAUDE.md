@@ -673,6 +673,7 @@ Only the **first channel identity** needs to be allowlisted. When a user binds a
 - **Markdown-to-HTML conversion**: `_markdown_to_telegram_html()` converts markdown to Telegram-compatible HTML before sending. Handles bold, italic, strikethrough, code blocks, inline code, headers, links, blockquotes, horizontal rules, and markdown tables (rendered as monospace `<pre>` blocks with aligned columns). Uses `parse_mode: "HTML"` (not `"Markdown"` v1 which is too strict for AI-generated content)
 - **Cross-channel binding**: "link accounts" generates 6-char code in DynamoDB with 10-min TTL
 - **Image uploads**: Telegram photos and Slack file attachments (JPEG, PNG, GIF, WebP, max 3.75 MB) are downloaded by the Router Lambda, uploaded to S3 under `{namespace}/_uploads/`, and passed to AgentCore as a structured message `{text, images[{s3Key, contentType}]}`
+- **Slack voice/audio**: Slack audio file attachments (allowed MIME types, max 10 MB) upload to `{namespace}/_uploads/aud_*` and structured payload includes `audio: [{s3Key, contentType, format}]`; contract appends `[OPENCLAW_AUDIO:[...]]` and the proxy sends Bedrock `audio` content blocks
 - **Telegram captions**: `message.get("text", "") or message.get("caption", "")` — photos use `caption`, not `text`
 - **Secret cache TTL**: Secrets Manager values cached for 15 minutes (was indefinite). Rotated secrets reflected within 15 min without container restart
 
@@ -683,6 +684,11 @@ Only the **first channel identity** needs to be allowlisted. When a user binds a
 - **Supported types**: `image/jpeg`, `image/png`, `image/gif`, `image/webp` (max 3.75 MB per Bedrock limit)
 - **Security**: S3 key validated against user's namespace prefix + path traversal (`..`) rejection. Format validated against `VALID_BEDROCK_FORMATS` set
 - **Slack prerequisite**: Bot needs `files:read` OAuth scope to download image files
+
+### Slack voice / audio flow
+- **Router Lambda** downloads Slack audio via `url_private_download` + bot token, uploads to `{namespace}/_uploads/aud_{ts}_{hex}.{ext}` (max 10 MB)
+- **Contract server** appends `[OPENCLAW_AUDIO:[{s3Key, contentType, format}]]` after any image marker in `buildBridgeText`
+- **Proxy** `extractMultimodalReferences` strips audio marker then image marker, `fetchAudioFromS3` validates `aud_` key prefix, builds `{audio: {format, source: {bytes}}}` for ConverseStream
 
 ### Workspace Persistence (Session Storage + S3 Backup)
 - **Primary**: AgentCore Session Storage — service-managed persistent filesystem mounted at `/mnt/workspace`. Data survives session stop/resume automatically. Configured via `filesystemConfigurations` on the Runtime
