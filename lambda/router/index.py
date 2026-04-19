@@ -1047,6 +1047,19 @@ def _download_feishu_image(content_str, msg_type):
 
 # --- Screenshot marker detection ---
 SCREENSHOT_MARKER_RE = re.compile(r"\[SCREENSHOT:([^\]]+)\]")
+VOICE_REPLY_MARKER_RE = re.compile(r"\[VOICE_REPLY:([^\]]+)\]")
+
+
+def _parse_response_media(text: str) -> tuple:
+    if not text:
+        return "", [], []
+    shot_keys = SCREENSHOT_MARKER_RE.findall(text)
+    voice_keys = VOICE_REPLY_MARKER_RE.findall(text)
+    t = SCREENSHOT_MARKER_RE.sub("", text)
+    t = VOICE_REPLY_MARKER_RE.sub("", t)
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    t = re.sub(r"[ \t]{2,}", " ", t).strip()
+    return t, shot_keys, voice_keys
 
 
 def _extract_screenshots(text: str) -> tuple:
@@ -1059,6 +1072,23 @@ def _extract_screenshots(text: str) -> tuple:
     clean = SCREENSHOT_MARKER_RE.sub("", text).strip()
     return clean, keys
 
+
+
+def _fetch_s3_voice_reply(s3_key: str, namespace: str):
+    if ".." in s3_key:
+        logger.error("Rejected S3 voice key with path traversal: %s", s3_key)
+        return None
+    expected_prefix = f"{namespace}/_voice_out/tts_"
+    if not s3_key.startswith(expected_prefix):
+        logger.error("Rejected S3 voice key outside user namespace: %s", s3_key)
+        return None
+    try:
+        bucket = os.environ["S3_USER_FILES_BUCKET"]
+        resp = s3_client.get_object(Bucket=bucket, Key=s3_key)
+        return resp["Body"].read()
+    except Exception as e:
+        logger.error("Failed to fetch voice reply from S3 key %s: %s", s3_key, e)
+        return None
 
 
 def _fetch_s3_image(s3_key: str, namespace: str):
@@ -1120,20 +1150,77 @@ def _send_telegram_photo(chat_id: str, image_bytes: bytes, caption, token: str) 
         return False
 
 
+def _send_telegram_audio_mp3(chat_id: str, audio_bytes: bytes, token: str) -> bool:
+    boundary = "----FormBoundary" + str(int(time.time()))
+    parts = []
+    parts.append(
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="chat_id"\r\n\r\n'
+        f"{chat_id}"
+    )
+    text_body = "\r\n".join(parts) + "\r\n"
+    audio_header = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="audio"; filename="reply.mp3"\r\n'
+        f"Content-Type: audio/mpeg\r\n\r\n"
+    )
+    closing = f"\r\n--{boundary}--\r\n"
+    body = text_body.encode() + audio_header.encode() + audio_bytes + closing.encode()
+    url = f"https://api.telegram.org/bot{token}/sendAudio"
+    req = urllib_request.Request(
+        url, data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+    try:
+        urllib_request.urlopen(req, timeout=60)
+        return True
+    except Exception as e:
+        logger.error("Failed to send Telegram audio: %s", e)
+        return False
 
 
+def _deliver_telegram_response_with_media(chat_id, response_text, token, namespace):
+    clean, shot_keys, voice_keys = _parse_response_media(response_text)
+    if clean:
+        if len(clean) <= 4096:
+            send_telegram_message(chat_id, clean, token)
+        else:
+            for i in range(0, len(clean), 4096):
+                send_telegram_message(chat_id, clean[i : i + 4096], token)
+    for sk in shot_keys:
+        img = _fetch_s3_image(sk, namespace)
+        if img:
+            _send_telegram_photo(chat_id, img, None, token)
+    for vk in voice_keys:
+        aud = _fetch_s3_voice_reply(vk, namespace)
+        if aud:
+            _send_telegram_audio_mp3(chat_id, aud, token)
 
-def _send_slack_file(channel_id: str, image_bytes: bytes, bot_token: str) -> bool:
-    """Upload a screenshot to Slack using the v2 file upload API.
 
-    Requires files:write Slack bot scope for screenshot delivery.
+def _deliver_slack_response_with_media(channel_id, response_text, bot_token, namespace):
+    clean, shot_keys, voice_keys = _parse_response_media(response_text)
+    if clean:
+        send_slack_message(channel_id, clean, bot_token)
+    for sk in shot_keys:
+        img = _fetch_s3_image(sk, namespace)
+        if img:
+            _send_slack_file(channel_id, img, bot_token, filename="screenshot.png", content_type="image/png")
+    for vk in voice_keys:
+        aud = _fetch_s3_voice_reply(vk, namespace)
+        if aud:
+            _send_slack_file(channel_id, aud, bot_token, filename="reply.mp3", content_type="audio/mpeg")
+
+
+def _send_slack_file(channel_id: str, file_bytes: bytes, bot_token: str, filename="screenshot.png", content_type="image/png") -> bool:
+    """Upload a file to Slack using the v2 file upload API.
+
+    Requires files:write Slack bot scope.
     """
     import urllib.request
     import urllib.parse
 
     try:
-        # Step 1: Get upload URL
-        params = urllib.parse.urlencode({"filename": "screenshot.png", "length": len(image_bytes)})
+        params = urllib.parse.urlencode({"filename": filename, "length": len(file_bytes)})
         req = urllib.request.Request(
             f"https://slack.com/api/files.getUploadURLExternal?{params}",
             headers={"Authorization": f"Bearer {bot_token}"},
@@ -1148,7 +1235,7 @@ def _send_slack_file(channel_id: str, image_bytes: bytes, bot_token: str) -> boo
 
         # Step 2: Upload file bytes
         urllib.request.urlopen(
-            urllib.request.Request(upload_url, data=image_bytes, method="POST"),
+            urllib.request.Request(upload_url, data=file_bytes, method="POST"),
             timeout=30,
         )
 
@@ -1572,12 +1659,8 @@ def handle_telegram(body):
         logger.info("Telegram response already streamed by contract — skipping send to chat_id=%s", chat_id)
         return
 
-    # Send response (split if > 4096 chars for Telegram limit)
-    if len(response_text) <= 4096:
-        send_telegram_message(chat_id, response_text, token)
-    else:
-        for i in range(0, len(response_text), 4096):
-            send_telegram_message(chat_id, response_text[i:i + 4096], token)
+    namespace = actor_id.replace(":", "_")
+    _deliver_telegram_response_with_media(chat_id, response_text, token, namespace)
     logger.info("Telegram response sent to chat_id=%s", chat_id)
 
 
@@ -1741,7 +1824,8 @@ def handle_slack(body, headers=None):
     response_text = result.get("response", "Sorry, I couldn't process your message.")
     response_text = _extract_text_from_content_blocks(response_text)
 
-    send_slack_message(channel_id, response_text, bot_token)
+    namespace = actor_id.replace(":", "_")
+    _deliver_slack_response_with_media(channel_id, response_text, bot_token, namespace)
     return {"statusCode": 200, "body": "ok"}
 
 
@@ -1897,8 +1981,10 @@ def handle_feishu(body, headers=None):
         notify_thread.join(timeout=2)
     response_text = result.get("response", "Sorry, I couldn't process your message.")
     response_text = _extract_text_from_content_blocks(response_text)
-
-    send_feishu_message(chat_id, response_text)
+    clean, _shots, voices = _parse_response_media(response_text)
+    if voices and not clean:
+        clean = "Voice reply is not supported in Feishu. Use Telegram or Slack for spoken replies from this bot."
+    send_feishu_message(chat_id, clean or " ")
     return {"statusCode": 200, "body": "ok"}
 
 

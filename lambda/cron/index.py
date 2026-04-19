@@ -533,6 +533,8 @@ def send_feishu_message(receiver_id, text):
 def deliver_response(channel, channel_target, response_text):
     """Deliver a response to the user's channel."""
     response_text = _extract_text_from_content_blocks(response_text)
+    response_text = re.sub(r"\[SCREENSHOT:[^\]]+\]", "", response_text)
+    response_text = re.sub(r"\[VOICE_REPLY:[^\]]+\]", "", response_text).strip()
 
     if channel == "telegram":
         token = _get_telegram_token()

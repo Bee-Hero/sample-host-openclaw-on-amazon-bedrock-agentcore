@@ -36,10 +36,37 @@ os.environ.setdefault("S3_USER_FILES_BUCKET", "test-bucket")
 from index import (
     _extract_screenshots,
     _fetch_s3_image,
+    _fetch_s3_voice_reply,
+    _parse_response_media,
     _send_telegram_photo,
     _send_slack_file,
     SCREENSHOT_MARKER_RE,
 )
+
+
+class TestParseResponseMedia(unittest.TestCase):
+    def test_parse_both_markers(self):
+        text, shots, voices = _parse_response_media(
+            "Hi [SCREENSHOT:a/_screenshots/x.png] [VOICE_REPLY:a/_voice_out/tts_1.mp3] bye"
+        )
+        self.assertEqual(text, "Hi bye")
+        self.assertEqual(shots, ["a/_screenshots/x.png"])
+        self.assertEqual(voices, ["a/_voice_out/tts_1.mp3"])
+
+
+class TestFetchS3VoiceReply(unittest.TestCase):
+    @patch("index.s3_client")
+    def test_fetch_voice_ok(self, mock_s3):
+        body_mock = MagicMock()
+        body_mock.read.return_value = b"mp3"
+        mock_s3.get_object.return_value = {"Body": body_mock}
+        with patch.dict(os.environ, {"S3_USER_FILES_BUCKET": "test-bucket"}):
+            result = _fetch_s3_voice_reply("telegram_1/_voice_out/tts_x.mp3", "telegram_1")
+        self.assertEqual(result, b"mp3")
+
+    def test_fetch_voice_rejects_other_namespace(self):
+        result = _fetch_s3_voice_reply("other/_voice_out/tts_x.mp3", "telegram_1")
+        self.assertIsNone(result)
 
 
 class TestExtractScreenshots(unittest.TestCase):
