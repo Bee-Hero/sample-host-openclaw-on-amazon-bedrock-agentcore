@@ -120,6 +120,7 @@ COPY cloudwatch-logger.js /app/cloudwatch-logger.js
 COPY scoped-credentials.js /app/scoped-credentials.js
 COPY transcribe-s3.js /app/transcribe-s3.js
 COPY polly-tts.js /app/polly-tts.js
+COPY openclaw-voice-delivery.js /app/openclaw-voice-delivery.js
 COPY response-markers.js /app/response-markers.js
 COPY telegram-multipart.js /app/telegram-multipart.js
 COPY telegram-media-from-s3.js /app/telegram-media-from-s3.js

@@ -47,6 +47,7 @@ const SYSTEM_PROMPT =
   "For API key storage, offer two options: manage_api_key (native file-based, simpler) " +
   "or manage_secret (AWS Secrets Manager, more secure). Recommend manage_secret for " +
   "production keys. Use retrieve_api_key to look up keys from either backend.\n\n" +
+  "**Voice replies**: When the user asks for voice, audio, read-aloud, or voice-only responses, call **synthesize_speech** with the text to speak (your full answer if they want voice only), then include the exact `[VOICE_REPLY:...]` line the tool returns in your message. Do not promise voice or say a preference is saved without calling that tool and pasting the marker.\n\n" +
   "After full startup completes (~1-2 minutes), you gain additional capabilities: " +
   "deep research (multi-step analysis), YouTube transcripts, rich Telegram formatting, " +
   "task decomposition with sub-agents, and enhanced web reading via Jina. " +
@@ -451,7 +452,7 @@ const TOOLS = [
       name: "synthesize_speech",
       description:
         "Convert text to spoken audio (Amazon Polly neural MP3), upload to the user's S3 namespace, " +
-        "and return a [VOICE_REPLY:key] marker for chat delivery. Use when the user asks for a voice or audio reply. " +
+        "and return a [VOICE_REPLY:key] marker for chat delivery. REQUIRED whenever the user asks for voice, audio, read-aloud, or voice-only replies — call before answering, then paste the marker in your reply. " +
         "Text is limited to about 3000 characters per call; shorten if needed.",
       parameters: {
         type: "object",
@@ -1499,9 +1500,11 @@ async function chat(userMessage, userId, deadlineMs = 0) {
     // If no tool calls, return the text response
     const toolCalls = assistantMessage.tool_calls;
     if (!toolCalls || toolCalls.length === 0) {
+      const raw = assistantMessage.content;
       const text =
-        assistantMessage.content ||
-        "I received your message but couldn't generate a response. Please try again.";
+        raw == null
+          ? "I received your message but couldn't generate a response. Please try again."
+          : raw;
       const footer =
         "\n\n---\n" +
         "_Warm-up mode — after full startup (~5-6 second), additional " +
