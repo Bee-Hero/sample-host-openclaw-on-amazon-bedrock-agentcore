@@ -26,6 +26,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+echo "Deploy start time: $(date "+%Y-%m-%d %H:%M:%S %Z")"
+
+deploy_end_report() {
+  echo "Deploy end time: $(date "+%Y-%m-%d %H:%M:%S %Z")"
+}
+trap deploy_end_report EXIT
+
 # --- Build mode ---
 BUILD_MODE="${BUILD_MODE:-local-build}"
 

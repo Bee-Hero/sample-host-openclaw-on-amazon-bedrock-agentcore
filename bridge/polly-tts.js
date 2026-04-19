@@ -66,7 +66,31 @@ async function synthesizeSpeechToS3({ text, namespace }) {
   return s3Key;
 }
 
+async function uploadMp3BytesToVoiceOut({ buffer, namespace }) {
+  validateNamespace(namespace);
+  const bucket = process.env.S3_USER_FILES_BUCKET;
+  if (!bucket) {
+    throw new Error("S3_USER_FILES_BUCKET is not set");
+  }
+  const audio = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+  if (!audio.length) {
+    throw new Error("empty audio buffer");
+  }
+  const suffix = crypto.randomBytes(4).toString("hex");
+  const s3Key = `${namespace}/_voice_out/tts_${Date.now()}_${suffix}.mp3`;
+  await getS3().send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: s3Key,
+      Body: audio,
+      ContentType: "audio/mpeg",
+    }),
+  );
+  return s3Key;
+}
+
 module.exports = {
   synthesizeSpeechToS3,
+  uploadMp3BytesToVoiceOut,
   MAX_CHARS,
 };

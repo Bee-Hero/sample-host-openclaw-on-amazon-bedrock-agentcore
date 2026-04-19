@@ -1129,7 +1129,13 @@ function resolveModelId(requestedModel) {
  * Call Bedrock Converse API (non-streaming).
  * Accepts optional systemTextOverride and toolConfig for tool use.
  */
-async function invokeBedrock(messages, systemTextOverride, toolConfig, requestedModel) {
+async function invokeBedrock(
+  messages,
+  systemTextOverride,
+  toolConfig,
+  requestedModel,
+  namespace,
+) {
   const {
     BedrockRuntimeClient,
     ConverseCommand,
@@ -1189,12 +1195,21 @@ async function invokeBedrock(messages, systemTextOverride, toolConfig, requested
           },
         }));
 
+        let outText =
+          textParts.join("") ||
+          (toolCalls.length > 0
+            ? ""
+            : "I received your message but have no response.");
+        if (toolCalls.length === 0 && namespace) {
+          const { promoteAssistantAfterTtsToolTurn } = require("./openclaw-voice-delivery");
+          outText = await promoteAssistantAfterTtsToolTurn(
+            outText,
+            namespace,
+            bedrockMessages,
+          );
+        }
         return {
-          text:
-            textParts.join("") ||
-            (toolCalls.length > 0
-              ? ""
-              : "I received your message but have no response."),
+          text: outText,
           toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
           finishReason: toolCalls.length > 0 ? "tool_calls" : "stop",
           usage: response.usage || {},
@@ -1228,6 +1243,7 @@ async function invokeBedrockStreaming(
   model,
   systemTextOverride,
   toolConfig,
+  namespace,
 ) {
   const {
     BedrockRuntimeClient,
@@ -1239,6 +1255,11 @@ async function invokeBedrockStreaming(
     requestHandler: bedrockClientOptions(modelId),
   });
   const { bedrockMessages, systemText } = convertMessages(messages);
+  const { extractPendingTtsMediaPathFromBedrockMessages, promoteAssistantAfterTtsToolTurn } =
+    require("./openclaw-voice-delivery");
+  const deferTextSSE = !!(
+    namespace && extractPendingTtsMediaPathFromBedrockMessages(bedrockMessages)
+  );
   const finalSystemText = systemTextOverride || systemText;
 
   const params = {
@@ -1292,20 +1313,22 @@ async function invokeBedrockStreaming(
         if (event.contentBlockDelta?.delta?.text) {
           const textDelta = event.contentBlockDelta.delta.text;
           fullResponseText += textDelta;
-          const chunk = {
-            id: chatId,
-            object: "chat.completion.chunk",
-            created,
-            model: model || MODEL_ID,
-            choices: [
-              {
-                index: 0,
-                delta: { content: textDelta },
-                finish_reason: null,
-              },
-            ],
-          };
-          res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+          if (!deferTextSSE) {
+            const chunk = {
+              id: chatId,
+              object: "chat.completion.chunk",
+              created,
+              model: model || MODEL_ID,
+              choices: [
+                {
+                  index: 0,
+                  delta: { content: textDelta },
+                  finish_reason: null,
+                },
+              ],
+            };
+            res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+          }
         }
 
         // Tool use start
@@ -1384,6 +1407,57 @@ async function invokeBedrockStreaming(
         }
       }
 
+      let streamResultText = fullResponseText;
+      if (deferTextSSE) {
+        try {
+          const payload =
+            toolCalls.length > 0
+              ? fullResponseText
+              : await promoteAssistantAfterTtsToolTurn(
+                  fullResponseText,
+                  namespace,
+                  bedrockMessages,
+                );
+          if (payload) {
+            streamResultText = payload;
+            res.write(
+              `data: ${JSON.stringify({
+                id: chatId,
+                object: "chat.completion.chunk",
+                created,
+                model: model || MODEL_ID,
+                choices: [
+                  {
+                    index: 0,
+                    delta: { content: payload },
+                    finish_reason: null,
+                  },
+                ],
+              })}\n\n`,
+            );
+          }
+        } catch (err) {
+          console.warn(`[proxy] deferred TTS promote: ${err.message}`);
+          if (fullResponseText) {
+            res.write(
+              `data: ${JSON.stringify({
+                id: chatId,
+                object: "chat.completion.chunk",
+                created,
+                model: model || MODEL_ID,
+                choices: [
+                  {
+                    index: 0,
+                    delta: { content: fullResponseText },
+                    finish_reason: null,
+                  },
+                ],
+              })}\n\n`,
+            );
+          }
+        }
+      }
+
       // Send final chunk with appropriate finish_reason
       const finishReason = toolCalls.length > 0 ? "tool_calls" : "stop";
       const finalChunk = {
@@ -1407,7 +1481,7 @@ async function invokeBedrockStreaming(
         `[proxy] Stream complete: ${inputTokens}in/${outputTokens}out tokens` +
           (toolCalls.length > 0 ? `, ${toolCalls.length} tool call(s)` : ""),
       );
-      return fullResponseText;
+      return streamResultText;
     } catch (err) {
       lastError = err;
       console.error(
@@ -1442,7 +1516,7 @@ async function invokeBedrockStreaming(
 function formatChatResponse(result, model) {
   const message = {
     role: "assistant",
-    content: result.text || null,
+    content: typeof result.text === "string" ? result.text : null,
   };
   if (result.toolCalls) {
     message.tool_calls = result.toolCalls;
@@ -1684,6 +1758,7 @@ const server = http.createServer(async (req, res) => {
             parsed.model,
             systemTextOverride,
             toolConfig,
+            namespace,
           );
         } else {
           const result = await invokeBedrock(
@@ -1691,6 +1766,7 @@ const server = http.createServer(async (req, res) => {
             systemTextOverride,
             toolConfig,
             parsed.model,
+            namespace,
           );
           const response = formatChatResponse(result, parsed.model);
           console.log(

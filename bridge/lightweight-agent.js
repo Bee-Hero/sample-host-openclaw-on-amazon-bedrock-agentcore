@@ -1500,9 +1500,11 @@ async function chat(userMessage, userId, deadlineMs = 0) {
     // If no tool calls, return the text response
     const toolCalls = assistantMessage.tool_calls;
     if (!toolCalls || toolCalls.length === 0) {
+      const raw = assistantMessage.content;
       const text =
-        assistantMessage.content ||
-        "I received your message but couldn't generate a response. Please try again.";
+        raw == null
+          ? "I received your message but couldn't generate a response. Please try again."
+          : raw;
       const footer =
         "\n\n---\n" +
         "_Warm-up mode — after full startup (~5-6 second), additional " +

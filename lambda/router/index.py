@@ -60,7 +60,14 @@ lambda_client = boto3.client("lambda", region_name=AWS_REGION)
 secrets_client = boto3.client("secretsmanager", region_name=AWS_REGION)
 s3_client = boto3.client("s3", region_name=AWS_REGION)
 
-USER_FILES_BUCKET = os.environ.get("USER_FILES_BUCKET", "")
+
+def _user_files_bucket_name():
+    return (
+        os.environ.get("S3_USER_FILES_BUCKET") or os.environ.get("USER_FILES_BUCKET", "")
+    ).strip()
+
+
+USER_FILES_BUCKET = _user_files_bucket_name()
 
 # --- Token cache (survives across warm invocations, 15-min TTL) ---
 _SECRET_CACHE_TTL_SECONDS = 900  # 15 minutes
@@ -1082,8 +1089,11 @@ def _fetch_s3_voice_reply(s3_key: str, namespace: str):
     if not s3_key.startswith(expected_prefix):
         logger.error("Rejected S3 voice key outside user namespace: %s", s3_key)
         return None
+    bucket = _user_files_bucket_name()
+    if not bucket:
+        logger.error("User files bucket not configured — cannot fetch voice reply")
+        return None
     try:
-        bucket = os.environ["S3_USER_FILES_BUCKET"]
         resp = s3_client.get_object(Bucket=bucket, Key=s3_key)
         return resp["Body"].read()
     except Exception as e:
@@ -1102,8 +1112,11 @@ def _fetch_s3_image(s3_key: str, namespace: str):
     if not s3_key.startswith(expected_prefix):
         logger.error("Rejected S3 screenshot key outside user namespace: %s (expected prefix: %s)", s3_key, expected_prefix)
         return None
+    bucket = _user_files_bucket_name()
+    if not bucket:
+        logger.error("User files bucket not configured — cannot fetch screenshot")
+        return None
     try:
-        bucket = os.environ["S3_USER_FILES_BUCKET"]
         resp = s3_client.get_object(Bucket=bucket, Key=s3_key)
         return resp["Body"].read()
     except Exception as e:

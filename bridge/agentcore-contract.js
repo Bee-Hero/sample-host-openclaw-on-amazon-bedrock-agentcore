@@ -1372,15 +1372,49 @@ async function bridgeMessage(message, timeoutMs = 620000, onDelta) {
     let connectReqId = null;
     let chatReqId = null;
     let unhandledMsgs = [];
+    let lastMediaHint = null;
 
-    const done = (text) => {
+    const extractFromPayload = (pl) => {
+      return (
+        extractTextFromContent(pl.message?.content) ||
+        extractTextFromContent(pl.message) ||
+        extractTextFromContent(pl.text) ||
+        extractTextFromContent(pl.content)
+      );
+    };
+
+    const bumpMediaHints = (payload) => {
+      const { collectMediaPathsFromString } = require("./openclaw-voice-delivery");
+      for (const p of collectMediaPathsFromString(JSON.stringify(payload))) {
+        lastMediaHint = p;
+      }
+      const ex = extractFromPayload(payload);
+      if (ex) {
+        for (const p of collectMediaPathsFromString(ex)) {
+          lastMediaHint = p;
+        }
+      }
+    };
+
+    const finish = async (text) => {
       if (resolved) return;
       resolved = true;
       clearTimeout(timer);
       try {
         ws.close();
       } catch {}
-      resolve(text);
+      let out = text;
+      try {
+        const { promoteOpenclawTtsInResponse } = require("./openclaw-voice-delivery");
+        out = await promoteOpenclawTtsInResponse(
+          text,
+          currentNamespace,
+          lastMediaHint,
+        );
+      } catch (err) {
+        console.warn(`[contract] OpenClaw voice promote: ${err.message}`);
+      }
+      resolve(out);
     };
 
     const timer = setTimeout(() => {
@@ -1391,8 +1425,7 @@ async function bridgeMessage(message, timeoutMs = 620000, onDelta) {
       console.warn(
         `[contract] WebSocket timeout after ${timeoutMs}ms (auth=${authenticated}, chatSent=${chatSent}, responseLen=${responseText.length})${debugInfo}`,
       );
-      // Return "" on timeout so caller can fall back to lightweight agent
-      done(responseText || "");
+      void finish(responseText || "");
     }, timeoutMs);
 
     ws.on("open", () => {
@@ -1446,7 +1479,7 @@ async function bridgeMessage(message, timeoutMs = 620000, onDelta) {
           console.error(
             `[contract] Connect rejected: ${JSON.stringify(msg.error || msg.payload)}`,
           );
-          done(
+          void finish(
             `Auth failed: ${msg.error?.message || JSON.stringify(msg.payload)}`,
           );
           return;
@@ -1472,16 +1505,6 @@ async function bridgeMessage(message, timeoutMs = 620000, onDelta) {
         return;
       }
 
-      // Helper: try all known content locations in a payload
-      const extractFromPayload = (pl) => {
-        return (
-          extractTextFromContent(pl.message?.content) ||
-          extractTextFromContent(pl.message) ||
-          extractTextFromContent(pl.text) ||
-          extractTextFromContent(pl.content)
-        );
-      };
-
       // Step 3: Chat events — state: "delta" (streaming) or "final" (complete)
       // OpenClaw puts content in payload.message.content (usual) or
       // directly in payload.message (string or content-blocks array).
@@ -1489,6 +1512,7 @@ async function bridgeMessage(message, timeoutMs = 620000, onDelta) {
         const payload = msg.payload || {};
 
         if (payload.state === "delta") {
+          bumpMediaHints(payload);
           const text = extractFromPayload(payload);
           if (text) {
             responseText = text; // Delta replaces (accumulates progressively)
@@ -1498,19 +1522,20 @@ async function bridgeMessage(message, timeoutMs = 620000, onDelta) {
         }
 
         if (payload.state === "final") {
+          bumpMediaHints(payload);
           // Final message may include the complete text
           const text = extractFromPayload(payload);
           if (text) responseText = text;
           console.log(`[contract] Chat final (${responseText.length} chars)`);
           if (responseText) {
-            done(responseText);
+            void finish(responseText);
           } else {
             // Empty final — log full payload for diagnostics and return ""
             // to signal caller that the bridge got no content.
             console.warn(
               `[contract] Empty final event — payload: ${JSON.stringify(payload).slice(0, 1000)}`,
             );
-            done("");
+            void finish("");
           }
           return;
         }
@@ -1519,14 +1544,14 @@ async function bridgeMessage(message, timeoutMs = 620000, onDelta) {
           console.error(
             `[contract] Chat error event: ${payload.errorMessage || "unknown"}`,
           );
-          done(
+          void finish(
             responseText || `Chat error: ${payload.errorMessage || "unknown"}`,
           );
           return;
         }
 
         if (payload.state === "aborted") {
-          done(responseText || "Chat aborted.");
+          void finish(responseText || "Chat aborted.");
           return;
         }
         return;
@@ -1538,7 +1563,7 @@ async function bridgeMessage(message, timeoutMs = 620000, onDelta) {
           console.error(
             `[contract] Chat error: ${JSON.stringify(msg.error || msg.payload)}`,
           );
-          done(
+          void finish(
             responseText || `Chat error: ${msg.error?.message || "unknown"}`,
           );
           return;
@@ -1552,12 +1577,12 @@ async function bridgeMessage(message, timeoutMs = 620000, onDelta) {
         if (status === "started" || status === "accepted") return;
         // "final" or "done" = completed — return "" if no content (bridge empty)
         if (responseText) {
-          done(responseText);
+          void finish(responseText);
         } else {
           console.warn(
             `[contract] Chat response completed with no streaming content — payload: ${JSON.stringify(msg.payload).slice(0, 500)}`,
           );
-          done("");
+          void finish("");
         }
         return;
       }
@@ -1569,7 +1594,7 @@ async function bridgeMessage(message, timeoutMs = 620000, onDelta) {
     ws.on("error", (err) => {
       console.error(`[contract] WebSocket error: ${err.message}`);
       // Return "" on error so caller can fall back to lightweight agent
-      done(responseText || "");
+      void finish(responseText || "");
     });
 
     ws.on("close", (code, reason) => {
@@ -1582,7 +1607,7 @@ async function bridgeMessage(message, timeoutMs = 620000, onDelta) {
         `[contract] WebSocket closed: code=${code} reason=${reasonStr} auth=${authenticated} chatSent=${chatSent} responseLen=${responseText.length}${debugInfo}`,
       );
       // Return "" on unexpected close so caller can fall back to lightweight agent
-      done(responseText || "");
+      void finish(responseText || "");
     });
   });
 }
