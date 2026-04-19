@@ -1,4 +1,5 @@
 const crypto = require("crypto");
+const { S3Client, GetObjectCommand } = require("@aws-sdk/client-s3");
 const {
   TranscribeClient,
   StartTranscriptionJobCommand,
@@ -49,15 +50,107 @@ function buildTranscribeClient(region, transcribeClient) {
   return new TranscribeClient({ region });
 }
 
-async function fetchTranscriptJson(uri, fetchFn) {
-  const res = await fetchFn(uri, { method: "GET" });
-  if (!res.ok) {
-    throw new Error(`transcript download HTTP ${res.status}`);
+function buildS3Client(region, s3Client) {
+  if (s3Client) return s3Client;
+  return new S3Client({ region });
+}
+
+function parseTranscriptHttpsToS3Ref(uri) {
+  if (!uri || typeof uri !== "string") return null;
+  try {
+    const u = new URL(uri);
+    const path = decodeURIComponent(u.pathname.replace(/^\//, ""));
+    const host = u.hostname.toLowerCase();
+    const pathStyle = /^s3[.-]([a-z0-9-]+)\.amazonaws\.com$/.exec(host);
+    if (pathStyle && path) {
+      const i = path.indexOf("/");
+      if (i <= 0) return null;
+      return { bucket: path.slice(0, i), key: path.slice(i + 1) };
+    }
+    const vh = /^(.+)\.s3[.-]([a-z0-9-]+)\.amazonaws\.com$/.exec(host);
+    if (vh && path) {
+      return { bucket: vh[1], key: path };
+    }
+  } catch {
+    return null;
   }
-  const data = await res.json();
+  return null;
+}
+
+function newJobName() {
+  return `oc${crypto.randomUUID().replace(/-/g, "")}`.slice(0, 200);
+}
+
+async function deleteJobQuietly(tc, jobName) {
+  try {
+    await tc.send(
+      new DeleteTranscriptionJobCommand({ TranscriptionJobName: jobName }),
+    );
+  } catch {
+  }
+}
+
+async function fetchTranscriptJson(uri, fetchFn, s3) {
+  const ref = parseTranscriptHttpsToS3Ref(uri);
+  let data;
+  if (ref && s3) {
+    const out = await s3.send(
+      new GetObjectCommand({ Bucket: ref.bucket, Key: ref.key }),
+    );
+    const raw = await out.Body.transformToString();
+    data = JSON.parse(raw);
+  } else {
+    const res = await fetchFn(uri, { method: "GET" });
+    if (!res.ok) {
+      throw new Error(`transcript download HTTP ${res.status}`);
+    }
+    data = await res.json();
+  }
   const t = data?.results?.transcripts?.[0]?.transcript;
   return typeof t === "string" ? t.trim() : "";
 }
+
+async function pollTranscriptionJob(tc, jobName, fetchFn, s3) {
+  const deadline = Date.now() + MAX_WAIT_MS;
+  let status = "";
+  while (Date.now() < deadline) {
+    const g = await tc.send(
+      new GetTranscriptionJobCommand({ TranscriptionJobName: jobName }),
+    );
+    const job = g.TranscriptionJob;
+    status = job?.TranscriptionJobStatus || "";
+    if (status === "COMPLETED") {
+      const uri = job?.Transcript?.TranscriptFileUri;
+      if (!uri) {
+        await deleteJobQuietly(tc, jobName);
+        throw new Error("transcribe completed but no TranscriptFileUri");
+      }
+      const fetchImpl = fetchFn || fetch;
+      const text = await fetchTranscriptJson(uri, fetchImpl, s3);
+      await deleteJobQuietly(tc, jobName);
+      return text;
+    }
+    if (status === "FAILED") {
+      const reason = job?.FailureReason || "unknown";
+      await deleteJobQuietly(tc, jobName);
+      throw new Error(`Transcribe job failed: ${reason}`);
+    }
+    await new Promise((r) => setTimeout(r, POLL_MS));
+  }
+  await deleteJobQuietly(tc, jobName);
+  throw new Error(`Transcribe job timed out (last status=${status})`);
+}
+
+async function startAndPollTranscription(tc, startInput, fetchFn, s3) {
+  await tc.send(new StartTranscriptionJobCommand(startInput));
+  return pollTranscriptionJob(tc, startInput.TranscriptionJobName, fetchFn, s3);
+}
+
+const LANGUAGE_ATTEMPTS = [
+  { IdentifyLanguage: true, LanguageOptions: ["en-US", "he-IL"] },
+  { LanguageCode: "en-US" },
+  { LanguageCode: "he-IL" },
+];
 
 async function transcribeS3Audio(opts) {
   const {
@@ -65,6 +158,7 @@ async function transcribeS3Audio(opts) {
     mediaFormat,
     namespace,
     transcribeClient: injectedTc,
+    s3Client: injectedS3,
     fetchImpl,
   } = opts;
   const err = validateAudioS3Key(s3Key, namespace);
@@ -77,11 +171,10 @@ async function transcribeS3Audio(opts) {
     throw new Error("S3_USER_FILES_BUCKET is not set");
   }
   const mediaFmt = bedrockFormatToTranscribeMediaFormat(mediaFormat);
-  const jobName = `oc${crypto.randomUUID().replace(/-/g, "")}`.slice(0, 200);
   const mediaUri = `s3://${bucket}/${s3Key}`;
   const tc = buildTranscribeClient(region, injectedTc);
-  const startInput = {
-    TranscriptionJobName: jobName,
+  const s3 = buildS3Client(region, injectedS3);
+  const base = {
     Media: { MediaFileUri: mediaUri },
     MediaFormat: mediaFmt,
     OutputBucketName: bucket,
@@ -89,60 +182,34 @@ async function transcribeS3Audio(opts) {
   };
   const cmk = process.env.CMK_ARN;
   if (cmk) {
-    startInput.OutputEncryptionKMSKeyId = cmk;
+    base.OutputEncryptionKMSKeyId = cmk;
   }
-  await tc.send(new StartTranscriptionJobCommand(startInput));
-  const deadline = Date.now() + MAX_WAIT_MS;
-  let status = "";
-  while (Date.now() < deadline) {
-    const g = await tc.send(
-      new GetTranscriptionJobCommand({ TranscriptionJobName: jobName }),
-    );
-    const job = g.TranscriptionJob;
-    status = job?.TranscriptionJobStatus || "";
-    if (status === "COMPLETED") {
-      const uri = job?.Transcript?.TranscriptFileUri;
-      if (!uri) {
-        throw new Error("transcribe completed but no TranscriptFileUri");
+  let lastErr;
+  const n = LANGUAGE_ATTEMPTS.length;
+  for (let i = 0; i < n; i++) {
+    const lang = LANGUAGE_ATTEMPTS[i];
+    const jobName = newJobName();
+    const startInput = { ...base, ...lang, TranscriptionJobName: jobName };
+    try {
+      const text = await startAndPollTranscription(tc, startInput, fetchImpl, s3);
+      if (text.trim() || i === n - 1) {
+        return text;
       }
-      const fetchFn = fetchImpl || fetch;
-      const text = await fetchTranscriptJson(uri, fetchFn);
-      try {
-        await tc.send(
-          new DeleteTranscriptionJobCommand({
-            TranscriptionJobName: jobName,
-          }),
-        );
-      } catch {
+      lastErr = new Error("Transcribe returned empty transcript");
+    } catch (e) {
+      lastErr = e;
+      if (e?.message && /timed out/i.test(e.message)) {
+        throw e;
       }
-      return text;
     }
-    if (status === "FAILED") {
-      const reason = job?.FailureReason || "unknown";
-      try {
-        await tc.send(
-          new DeleteTranscriptionJobCommand({
-            TranscriptionJobName: jobName,
-          }),
-        );
-      } catch {
-      }
-      throw new Error(`Transcribe job failed: ${reason}`);
-    }
-    await new Promise((r) => setTimeout(r, POLL_MS));
   }
-  try {
-    await tc.send(
-      new DeleteTranscriptionJobCommand({ TranscriptionJobName: jobName }),
-    );
-  } catch {
-  }
-  throw new Error(`Transcribe job timed out (last status=${status})`);
+  throw lastErr;
 }
 
 module.exports = {
   transcribeS3Audio,
   validateAudioS3Key,
   bedrockFormatToTranscribeMediaFormat,
+  parseTranscriptHttpsToS3Ref,
   OUTPUT_PREFIX,
 };

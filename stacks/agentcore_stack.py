@@ -315,34 +315,42 @@ class AgentCoreStack(Stack):
             )
         )
 
+        transcribe_source_arn = f"arn:aws:transcribe:{region}:{account}:*"
+        transcribe_s3_conditions = {
+            "StringEquals": {"aws:SourceAccount": account},
+            "ArnLike": {"aws:SourceArn": transcribe_source_arn},
+        }
         self.user_files_bucket.add_to_resource_policy(
             iam.PolicyStatement(
                 sid="OpenClawTranscribeReadMedia",
                 principals=[iam.ServicePrincipal("transcribe.amazonaws.com")],
                 actions=["s3:GetObject"],
                 resources=[self.user_files_bucket.arn_for_objects("*")],
-                conditions={
-                    "StringEquals": {"aws:SourceAccount": account},
-                    "ArnLike": {
-                        "aws:SourceArn": f"arn:aws:transcribe:{region}:{account}:transcription-job/*",
-                    },
-                },
+                conditions=transcribe_s3_conditions,
+            )
+        )
+        self.user_files_bucket.add_to_resource_policy(
+            iam.PolicyStatement(
+                sid="OpenClawTranscribeListBucket",
+                principals=[iam.ServicePrincipal("transcribe.amazonaws.com")],
+                actions=["s3:ListBucket"],
+                resources=[self.user_files_bucket.bucket_arn],
+                conditions=transcribe_s3_conditions,
             )
         )
         self.user_files_bucket.add_to_resource_policy(
             iam.PolicyStatement(
                 sid="OpenClawTranscribeWriteOutput",
                 principals=[iam.ServicePrincipal("transcribe.amazonaws.com")],
-                actions=["s3:PutObject"],
+                actions=[
+                    "s3:PutObject",
+                    "s3:AbortMultipartUpload",
+                    "s3:ListMultipartUploadParts",
+                ],
                 resources=[
                     self.user_files_bucket.arn_for_objects("_transcribe_output/*"),
                 ],
-                conditions={
-                    "StringEquals": {"aws:SourceAccount": account},
-                    "ArnLike": {
-                        "aws:SourceArn": f"arn:aws:transcribe:{region}:{account}:transcription-job/*",
-                    },
-                },
+                conditions=transcribe_s3_conditions,
             )
         )
 
@@ -352,7 +360,9 @@ class AgentCoreStack(Stack):
                 principals=[iam.ServicePrincipal("transcribe.amazonaws.com")],
                 actions=[
                     "kms:Decrypt",
-                    "kms:GenerateDataKey",
+                    "kms:Encrypt",
+                    "kms:GenerateDataKey*",
+                    "kms:ReEncrypt*",
                     "kms:CreateGrant",
                     "kms:DescribeKey",
                 ],
